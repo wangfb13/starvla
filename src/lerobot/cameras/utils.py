@@ -42,6 +42,21 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
 
             cameras[key] = Reachy2Camera(cfg)
 
+        elif cfg.type in {"orbbec", "OrbbecCamera"}:
+            from .orbbec import OrbbecCamera
+
+            cameras[key] = OrbbecCamera(cfg)
+
+        elif cfg.type == "wirstFisheyeX5":
+            from .wrist_fisheye_x5 import WristFisheyeX5Camera
+
+            cameras[key] = WristFisheyeX5Camera(cfg)
+
+        elif cfg.type == "dmTactileX5":
+            from .dm_tactile_x5 import DmTactileCameraX5
+
+            cameras[key] = DmTactileCameraX5(cfg)
+
         elif cfg.type == "zmq":
             from .zmq.camera_zmq import ZMQCamera
 

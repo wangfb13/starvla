@@ -47,8 +47,13 @@ import draccus
 import grpc
 import torch
 
+from lerobot.cameras.dm_tactile_x5.configuration_dm_tactile_x5 import DmTactileCameraX5Config  # noqa: F401
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.wrist_fisheye_x5.configuration_wrist_fisheye_x5 import (  # noqa: F401
+    WirstFisheyeCameraX5Config,
+)
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,

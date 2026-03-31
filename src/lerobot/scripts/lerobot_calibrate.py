@@ -31,8 +31,13 @@ from pprint import pformat
 
 import draccus
 
+from lerobot.cameras.dm_tactile_x5.configuration_dm_tactile_x5 import DmTactileCameraX5Config  # noqa: F401
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.wrist_fisheye_x5.configuration_wrist_fisheye_x5 import (  # noqa: F401
+    WirstFisheyeCameraX5Config,
+)
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -44,6 +49,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     omx_follower,
     openarm_follower,
+    spark3_pose_gripper,
     so_follower,
 )
 from lerobot.teleoperators import (  # noqa: F401
@@ -57,6 +63,7 @@ from lerobot.teleoperators import (  # noqa: F401
     omx_leader,
     openarm_leader,
     openarm_mini,
+    spark3_pose_gripper,
     so_leader,
     unitree_g1,
 )

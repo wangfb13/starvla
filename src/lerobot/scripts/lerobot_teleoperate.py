@@ -59,7 +59,12 @@ from pprint import pformat
 import rerun as rr
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig  # noqa: F401
+from lerobot.cameras.dm_tactile_x5.configuration_dm_tactile_x5 import DmTactileCameraX5Config  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.wrist_fisheye_x5.configuration_wrist_fisheye_x5 import (  # noqa: F401
+    WirstFisheyeCameraX5Config,
+)
 from lerobot.cameras.zmq.configuration_zmq import ZMQCameraConfig  # noqa: F401
 from lerobot.configs import parser
 from lerobot.processor import (
@@ -80,6 +85,7 @@ from lerobot.robots import (  # noqa: F401
     omx_follower,
     openarm_follower,
     reachy2,
+    spark3_pose_gripper,
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
@@ -97,6 +103,7 @@ from lerobot.teleoperators import (  # noqa: F401
     openarm_leader,
     openarm_mini,
     reachy2_teleoperator,
+    spark3_pose_gripper,
     so_leader,
     unitree_g1,
 )

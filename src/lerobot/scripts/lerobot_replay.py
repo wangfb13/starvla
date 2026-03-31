@@ -45,6 +45,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pformat
 
+from lerobot.cameras.dm_tactile_x5.configuration_dm_tactile_x5 import DmTactileCameraX5Config  # noqa: F401
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig  # noqa: F401
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.wrist_fisheye_x5.configuration_wrist_fisheye_x5 import (  # noqa: F401
+    WirstFisheyeCameraX5Config,
+)
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import (
@@ -62,6 +69,7 @@ from lerobot.robots import (  # noqa: F401
     omx_follower,
     openarm_follower,
     reachy2,
+    spark3_pose_gripper,
     so_follower,
     unitree_g1,
 )
