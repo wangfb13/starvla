@@ -61,6 +61,9 @@ class OrbbecCamera(Camera):
 
         self.pipeline: Any | None = None
         self.pipeline_profile: Any | None = None
+        self.color_profile: Any | None = None
+        self.depth_profile: Any | None = None
+        self._is_streaming = False
         self.thread: Thread | None = None
         self.stop_event: Event | None = None
         self.frame_lock: Lock = Lock()
@@ -80,7 +83,7 @@ class OrbbecCamera(Camera):
 
     @property
     def is_connected(self) -> bool:
-        return self.pipeline is not None and self.pipeline_profile is not None
+        return self.pipeline is not None and self._is_streaming
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
@@ -129,15 +132,8 @@ class OrbbecCamera(Camera):
         config = sdk.Config()
 
         color_profile_list = self.pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
-        if self.fps and self.capture_width and self.capture_height:
-            color_profile = color_profile_list.get_video_stream_profile(
-                self.capture_width,
-                self.capture_height,
-                sdk.OBFormat.RGB,
-                self.fps,
-            )
-        else:
-            color_profile = color_profile_list.get_default_video_stream_profile()
+        color_profile = self._select_color_profile(color_profile_list, sdk)
+        self.color_profile = color_profile
         config.enable_stream(color_profile)
 
         if self.use_depth:
@@ -149,12 +145,14 @@ class OrbbecCamera(Camera):
                 ),
                 self._supported_depth_resolutions(depth_profile_list),
             )
-            depth_profile = depth_profile_list.get_video_stream_profile(
+            depth_profile = self._select_depth_profile(
+                depth_profile_list,
+                sdk,
                 closest_width,
                 closest_height,
-                sdk.OBFormat.Y16,
                 self.fps or color_profile.get_fps(),
             )
+            self.depth_profile = depth_profile
             config.enable_stream(depth_profile)
             config.set_align_mode(sdk.OBAlignMode.HW_MODE)
             config.set_frame_aggregate_output_mode(sdk.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
@@ -169,9 +167,13 @@ class OrbbecCamera(Camera):
 
         try:
             self.pipeline_profile = self.pipeline.start(config)
+            self._is_streaming = True
         except Exception as e:
             self.pipeline = None
             self.pipeline_profile = None
+            self.color_profile = None
+            self.depth_profile = None
+            self._is_streaming = False
             raise ConnectionError(
                 f"Failed to open {self}. Run `lerobot-find-cameras orbbec` to inspect available devices."
             ) from e
@@ -242,6 +244,9 @@ class OrbbecCamera(Camera):
             self.pipeline.stop()
         self.pipeline = None
         self.pipeline_profile = None
+        self.color_profile = None
+        self.depth_profile = None
+        self._is_streaming = False
         self.point_cloud_filter = None
         with self.frame_lock:
             self.latest_color_frame = None
@@ -295,11 +300,50 @@ class OrbbecCamera(Camera):
 
         return min(supported_resolutions, key=lambda resolution: distance(resolution, target_resolution))
 
-    def _configure_capture_settings(self, sdk: Any) -> None:
-        if self.pipeline_profile is None:
-            raise RuntimeError(f"{self} pipeline profile is not initialized.")
+    def _select_color_profile(self, color_profile_list: Any, sdk: Any) -> Any:
+        candidates: list[tuple[int, int, Any, int]] = []
+        if self.fps and self.capture_width and self.capture_height:
+            candidates.append((self.capture_width, self.capture_height, sdk.OBFormat.RGB, self.fps))
+            candidates.append((self.capture_width, self.capture_height, sdk.OBFormat.MJPG, self.fps))
+        candidates.extend(
+            [
+                (0, 0, sdk.OBFormat.RGB, 0),
+                (0, 0, sdk.OBFormat.MJPG, 0),
+            ]
+        )
 
-        stream = self.pipeline_profile.get_stream(sdk.OBSensorType.COLOR_SENSOR).as_video_stream_profile()
+        for width, height, fmt, fps in candidates:
+            try:
+                return color_profile_list.get_video_stream_profile(width, height, fmt, fps)
+            except Exception:
+                continue
+
+        return color_profile_list.get_default_video_stream_profile()
+
+    def _select_depth_profile(
+        self,
+        depth_profile_list: Any,
+        sdk: Any,
+        width: int,
+        height: int,
+        fps: int,
+    ) -> Any:
+        candidates = [
+            (width, height, sdk.OBFormat.Y16, fps),
+            (0, 0, sdk.OBFormat.Y16, 0),
+        ]
+        for candidate_width, candidate_height, fmt, candidate_fps in candidates:
+            try:
+                return depth_profile_list.get_video_stream_profile(
+                    candidate_width, candidate_height, fmt, candidate_fps
+                )
+            except Exception:
+                continue
+
+        return depth_profile_list.get_default_video_stream_profile()
+
+    def _configure_capture_settings(self, sdk: Any) -> None:
+        stream = self._get_color_stream_profile(sdk)
         if self.fps is None:
             self.fps = stream.get_fps()
 
@@ -313,6 +357,34 @@ class OrbbecCamera(Camera):
         else:
             self.width = self.capture_width
             self.height = self.capture_height
+
+    def _get_color_stream_profile(self, sdk: Any) -> Any:
+        if self.color_profile is not None:
+            return self.color_profile
+
+        if self.pipeline_profile is not None:
+            try:
+                return self.pipeline_profile.get_stream(sdk.OBSensorType.COLOR_SENSOR).as_video_stream_profile()
+            except Exception:
+                pass
+
+        if self.pipeline is None:
+            raise RuntimeError(f"{self} pipeline is not initialized.")
+
+        frames = self.pipeline.wait_for_frames(1000)
+        if frames is None:
+            raise RuntimeError(f"{self} did not return frames while initializing stream profile.")
+
+        color_frame = frames.get_color_frame()
+        if color_frame is None:
+            raise RuntimeError(f"{self} returned an empty color frame while initializing stream profile.")
+
+        profile = color_frame.get_stream_profile()
+        if hasattr(profile, "as_video_stream_profile"):
+            profile = profile.as_video_stream_profile()
+
+        self.color_profile = profile
+        return profile
 
     def _read_from_hardware(self) -> None:
         if self.pipeline is None or self._sdk is None:
