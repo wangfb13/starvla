@@ -470,15 +470,18 @@ class OrbbecCamera(Camera):
     def _extract_color_frame(self, color_frame: Any, sdk: Any) -> NDArray[Any]:
         width = int(color_frame.get_width())
         height = int(color_frame.get_height())
-        buffer = np.asarray(color_frame.get_data())
+        # pyorbbecsdk on Python 3.12 may expose frame storage as a non-contiguous view.
+        # Materialize a contiguous uint8 array before reshaping or decoding.
+        buffer = np.array(color_frame.get_data(), dtype=np.uint8, copy=True)
+        buffer = np.ascontiguousarray(buffer)
         frame_format = color_frame.get_format()
 
         if frame_format == sdk.OBFormat.RGB:
-            color_image = np.frombuffer(buffer, dtype=np.uint8).reshape(height, width, 3)
+            color_image = buffer.reshape(height, width, 3)
             if self.color_mode == ColorMode.BGR:
                 color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
         else:
-            decoded = cv2.imdecode(np.frombuffer(buffer, np.uint8), cv2.IMREAD_COLOR)
+            decoded = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
             if decoded is None:
                 raise RuntimeError(f"{self} failed to decode color frame.")
             color_image = decoded
