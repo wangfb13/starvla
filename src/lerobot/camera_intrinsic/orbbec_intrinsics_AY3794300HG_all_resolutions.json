@@ -1,0 +1,268 @@
+{
+    "device_info": {
+        "name": "Orbbec Gemini 2",
+        "serial_number": "AY6G65300YN",
+        "pid": 1648,
+        "vid": 11205,
+        "firmware_version": "1.4.92",
+        "calibration_date": "2026-03-17T14:22:15.469876",
+        "save_directory": "/home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic",
+        "available_resolutions": {
+            "color": [
+                "640x360",
+                "640x480",
+                "1280x720",
+                "1920x1080"
+            ],
+            "depth": [
+                "320x200",
+                "640x400",
+                "1280x800"
+            ]
+        },
+        "successful_calibrations": {
+            "color": 4,
+            "depth": 3
+        },
+        "depth_scale": 1.0,
+        "depth_unit": "millimeter",
+        "depth_conversion_formula": "depth_in_millimeter = depth_raw * depth_scale"
+    },
+    "color_calibrations": [
+        {
+            "resolution": "640x360",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "640x360",
+                "width": 640,
+                "height": 360,
+                "fx": 345.28363037109375,
+                "fy": 345.20489501953125,
+                "cx": 319.2223815917969,
+                "cy": 177.57273864746094,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "640x360",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 39.46620178222656,
+                    "k2": -87.43331146240234,
+                    "p1": -0.001024028635583818,
+                    "p2": -0.0008590460638515651,
+                    "k3": 98.55587768554688,
+                    "k4": 39.32447052001953,
+                    "k5": -87.14644622802734,
+                    "k6": 98.74684143066406
+                }
+            }
+        },
+        {
+            "resolution": "640x480",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "640x480",
+                "width": 640,
+                "height": 480,
+                "fx": 517.9254150390625,
+                "fy": 517.8073120117188,
+                "cx": 319.3336181640625,
+                "cy": 236.35910034179688,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "640x480",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 39.46620178222656,
+                    "k2": -87.43331146240234,
+                    "p1": -0.001024028635583818,
+                    "p2": -0.0008590460638515651,
+                    "k3": 98.55587768554688,
+                    "k4": 39.32447052001953,
+                    "k5": -87.14644622802734,
+                    "k6": 98.74684143066406
+                }
+            }
+        },
+        {
+            "resolution": "1280x720",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "1280x720",
+                "width": 1280,
+                "height": 720,
+                "fx": 690.5672607421875,
+                "fy": 690.4097900390625,
+                "cx": 639.4447631835938,
+                "cy": 355.1454772949219,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "1280x720",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 39.46620178222656,
+                    "k2": -87.43331146240234,
+                    "p1": -0.001024028635583818,
+                    "p2": -0.0008590460638515651,
+                    "k3": 98.55587768554688,
+                    "k4": 39.32447052001953,
+                    "k5": -87.14644622802734,
+                    "k6": 98.74684143066406
+                }
+            }
+        },
+        {
+            "resolution": "1920x1080",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "1920x1080",
+                "width": 1920,
+                "height": 1080,
+                "fx": 1035.850830078125,
+                "fy": 1035.61474609375,
+                "cx": 959.1671142578125,
+                "cy": 532.7182006835938,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.COLOR_SENSOR",
+                "resolution": "1920x1080",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 39.46620178222656,
+                    "k2": -87.43331146240234,
+                    "p1": -0.001024028635583818,
+                    "p2": -0.0008590460638515651,
+                    "k3": 98.55587768554688,
+                    "k4": 39.32447052001953,
+                    "k5": -87.14644622802734,
+                    "k6": 98.74684143066406
+                }
+            }
+        }
+    ],
+    "depth_calibrations": [
+        {
+            "resolution": "320x200",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.DEPTH_SENSOR",
+                "resolution": "320x200",
+                "width": 320,
+                "height": 200,
+                "fx": 153.39341735839844,
+                "fy": 153.39341735839844,
+                "cx": 158.7684783935547,
+                "cy": 99.38015747070312,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.DEPTH_SENSOR",
+                "resolution": "320x200",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 0.0,
+                    "k2": 0.0,
+                    "p1": 0.0,
+                    "p2": 0.0,
+                    "k3": 0.0,
+                    "k4": 0.0,
+                    "k5": 0.0,
+                    "k6": 0.0
+                }
+            }
+        },
+        {
+            "resolution": "640x400",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.DEPTH_SENSOR",
+                "resolution": "640x400",
+                "width": 640,
+                "height": 400,
+                "fx": 306.7868347167969,
+                "fy": 306.7868347167969,
+                "cx": 318.5369567871094,
+                "cy": 198.76031494140625,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.DEPTH_SENSOR",
+                "resolution": "640x400",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 0.0,
+                    "k2": 0.0,
+                    "p1": 0.0,
+                    "p2": 0.0,
+                    "k3": 0.0,
+                    "k4": 0.0,
+                    "k5": 0.0,
+                    "k6": 0.0
+                }
+            }
+        },
+        {
+            "resolution": "1280x800",
+            "intrinsics": {
+                "sensor_type": "OBSensorType.DEPTH_SENSOR",
+                "resolution": "1280x800",
+                "width": 1280,
+                "height": 800,
+                "fx": 613.5736694335938,
+                "fy": 613.5736694335938,
+                "cx": 638.0739135742188,
+                "cy": 397.5206298828125,
+                "pixel_format": "unknown"
+            },
+            "distortion": {
+                "sensor_type": "OBSensorType.DEPTH_SENSOR",
+                "resolution": "1280x800",
+                "model": "unknown",
+                "coefficients": {
+                    "k1": 0.0,
+                    "k2": 0.0,
+                    "p1": 0.0,
+                    "p2": 0.0,
+                    "k3": 0.0,
+                    "k4": 0.0,
+                    "k5": 0.0,
+                    "k6": 0.0
+                }
+            }
+        }
+    ],
+    "extrinsic": {
+        "from_resolution": "320x200",
+        "to_resolution": "640x360",
+        "extrinsic": {
+            "from_resolution": "320x200",
+            "to_resolution": "640x360",
+            "rotation": [
+                [
+                    0.9999961256980896,
+                    0.0025494564324617386,
+                    -0.001124305767007172
+                ],
+                [
+                    -0.0025463406927883625,
+                    0.9999929666519165,
+                    0.0027641071937978268
+                ],
+                [
+                    0.0011313448194414377,
+                    -0.0027612335979938507,
+                    0.9999955296516418
+                ]
+            ],
+            "translation": [
+                -13.842753410339355,
+                0.16925594210624695,
+                -1.9338748455047607
+            ]
+        }
+    }
+}

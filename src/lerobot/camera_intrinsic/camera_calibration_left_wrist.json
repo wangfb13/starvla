@@ -1,0 +1,102 @@
+{
+  "camera_matrix": [
+    [
+      809.8285919866993,
+      0.0,
+      968.1533627215965
+    ],
+    [
+      0.0,
+      806.9831267615017,
+      568.6545337264536
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeffs": [
+    -0.09904021514440157,
+    -0.02562083274574698,
+    0.0589842445725622,
+    -0.02683261355416209
+  ],
+  "image_size": [
+    1920,
+    1080
+  ],
+  "rms_error": 9.268582134831297,
+  "num_images": 25,
+  "camera_type": "fisheye",
+  "fx": 809.8285919866993,
+  "fy": 806.9831267615017,
+  "cx": 968.1533627215965,
+  "cy": 568.6545337264536,
+  "calibration_debug": {
+    "layout": {
+      "id_order": "row",
+      "flip_x": true,
+      "flip_y": false
+    },
+    "strategy": {
+      "use_guess": false,
+      "check_cond": true
+    },
+    "subset_len": 25,
+    "used_frame_idx": [
+      4068,
+      2724,
+      2832,
+      2116,
+      2328,
+      2276,
+      2140,
+      2680,
+      4096,
+      1448,
+      2892,
+      4040,
+      856,
+      832,
+      2636,
+      2764,
+      2936,
+      3684,
+      4012,
+      796,
+      1516,
+      2080,
+      700,
+      2576,
+      1264
+    ]
+  },
+  "source_video": "/home/chenlvping/Camera_calibration/data/cam.mkv",
+  "board_type": "apriltag_grid",
+  "board_config": {
+    "dictionary": "tag36h11",
+    "board_cols": 6,
+    "board_rows": 6,
+    "tag_size_mm": 55.0,
+    "tag_gap_mm": 16.5,
+    "start_id": 0,
+    "end_id": 35,
+    "layout_used": {
+      "id_order": "row",
+      "flip_x": true,
+      "flip_y": false
+    }
+  },
+  "selection": {
+    "sample_every": 4,
+    "min_markers": 8,
+    "target_images": 25,
+    "min_images": 12,
+    "min_feature_dist": 0.2,
+    "min_time_gap": 0.4,
+    "sampled_frames": 1225,
+    "candidate_frames": 161,
+    "selected_frames": 25
+  }
+}

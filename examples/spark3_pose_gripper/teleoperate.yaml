@@ -20,12 +20,12 @@ robot:
   cameras:
     cam_top:
       type: OrbbecCamera
-      serial_number: AY6G65300YN
+      serial_number: AY3794300HG
       fps: 30
       width: 640
       height: 480
       use_depth: true
-      intrinsics_file: ${HF_LEROBOT_HOME}/run_scripts/intrinsics_data/orbbec_intrinsics_AY6G65300YN_all_resolutions.json
+      intrinsics_file: /home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic/orbbec_intrinsics_AY3794300HG_all_resolutions.json
 
     cam_right_wrist:
       type: wirstFisheyeX5
@@ -34,7 +34,7 @@ robot:
       width: 1920
       height: 1080
       use_gpu_decode: true
-      intrinsics_file: ${HF_LEROBOT_HOME}/run_scripts/intrinsics_data/camera_calibration_right_wrist.json
+      intrinsics_file: /home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic/camera_calibration_right_wrist.json
 
     cam_left_wrist:
       type: wirstFisheyeX5
@@ -43,7 +43,7 @@ robot:
       width: 1920
       height: 1080
       use_gpu_decode: true
-      intrinsics_file: ${HF_LEROBOT_HOME}/run_scripts/intrinsics_data/camera_calibration_left_wrist.json
+      intrinsics_file: /home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic/camera_calibration_left_wrist.json
 
     cam_right_gripper_tactile:
       type: dmTactileX5
