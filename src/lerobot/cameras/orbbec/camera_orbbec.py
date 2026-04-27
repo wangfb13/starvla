@@ -134,14 +134,6 @@ class OrbbecCamera(Camera):
         color_profile_list = self.pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
         color_profile = self._select_color_profile(color_profile_list, sdk)
         self.color_profile = color_profile
-        print(
-            "[orbbec] color_profile:",
-            color_profile.get_width(),
-            color_profile.get_height(),
-            color_profile.get_format(),
-            color_profile.get_fps(),
-            flush=True,
-        )
         logger.info(
             "%s selected color profile: %sx%s fmt=%s fps=%s",
             self,
@@ -169,14 +161,6 @@ class OrbbecCamera(Camera):
                 self.fps or color_profile.get_fps(),
             )
             self.depth_profile = depth_profile
-            print(
-                "[orbbec] depth_profile:",
-                depth_profile.get_width(),
-                depth_profile.get_height(),
-                depth_profile.get_format(),
-                depth_profile.get_fps(),
-                flush=True,
-            )
             logger.info(
                 "%s selected depth profile: %sx%s fmt=%s fps=%s",
                 self,
@@ -198,11 +182,9 @@ class OrbbecCamera(Camera):
                 self.point_cloud_filter.set_create_point_format(sdk.OBFormat.POINT)
 
         try:
-            print("[orbbec] starting pipeline", flush=True)
             logger.info("%s starting pipeline.", self)
             self.pipeline_profile = self.pipeline.start(config)
             self._is_streaming = True
-            print("[orbbec] pipeline started", type(self.pipeline_profile).__name__, flush=True)
             logger.info("%s pipeline started. profile=%s", self, type(self.pipeline_profile).__name__)
         except Exception as e:
             self.pipeline = None
@@ -222,7 +204,6 @@ class OrbbecCamera(Camera):
             attempt = 0
             while time.time() - start_time < max(self.warmup_s, 1):
                 attempt += 1
-                print(f"[orbbec] warmup async_read attempt={attempt}", flush=True)
                 logger.info("%s warmup attempt %s", self, attempt)
                 self.async_read(timeout_ms=max(self.warmup_s, 1) * 1000)
                 time.sleep(0.1)
@@ -432,12 +413,10 @@ class OrbbecCamera(Camera):
 
         sdk = self._sdk
         frames = self.pipeline.wait_for_frames(100)
-        print("[orbbec] wait_for_frames returned", frames is not None, flush=True)
         if frames is None:
             raise TimeoutError(f"{self} did not return frames in time.")
 
         color_frame = frames.get_color_frame()
-        print("[orbbec] color_frame is None:", color_frame is None, flush=True)
         if color_frame is None:
             raise RuntimeError(f"{self} returned an empty color frame.")
 
@@ -447,7 +426,6 @@ class OrbbecCamera(Camera):
         points = None
         if self.use_depth:
             depth_frame = frames.get_depth_frame()
-            print("[orbbec] depth_frame is None:", depth_frame is None, flush=True)
             if depth_frame is None:
                 raise RuntimeError(f"{self} returned an empty depth frame.")
             depth_image = self._extract_depth_frame(depth_frame)
@@ -535,10 +513,6 @@ class OrbbecCamera(Camera):
             except Exception as e:
                 failure_count += 1
                 if failure_count <= 10:
-                    print(
-                        f"[orbbec] read error #{failure_count}: {e} use_depth={self.use_depth}",
-                        flush=True,
-                    )
                     logger.warning(
                         "%s read error #%s: %s (use_depth=%s, color_profile=%s, depth_profile=%s)",
                         self,
