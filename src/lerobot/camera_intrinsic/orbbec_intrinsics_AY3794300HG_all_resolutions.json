@@ -1,12 +1,12 @@
 {
     "device_info": {
         "name": "Orbbec Gemini 2",
-        "serial_number": "AY6G65300YN",
+        "serial_number": "AY3794300HG",
         "pid": 1648,
         "vid": 11205,
         "firmware_version": "1.4.92",
-        "calibration_date": "2026-03-17T14:22:15.469876",
-        "save_directory": "/home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic",
+        "calibration_date": "2026-03-30T09:45:46.445418",
+        "save_directory": "/home/cxzk/DM_das/lerobot_spark_x5_armjoints/run_scripts/intrinsics_data",
         "available_resolutions": {
             "color": [
                 "640x360",
