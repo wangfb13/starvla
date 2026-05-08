@@ -1090,6 +1090,10 @@ class PI0Policy(PreTrainedPolicy):
 
         for key, value in state_dict.items():
             new_key = key
+            new_key = new_key.replace(
+                ".paligemma.model.vision_tower.vision_model.",
+                ".paligemma.model.vision_tower.",
+            )
 
             # Handle layer norm structure changes: .weight -> .dense.weight + .dense.bias
             # For gemma expert layers
@@ -1116,13 +1120,13 @@ class PI0Policy(PreTrainedPolicy):
 
             # Handle MLP naming changes for pi0
             # non-pi05 model expects action_time_mlp_*, but checkpoint might have time_mlp_*
-            if key.startswith("time_mlp_in."):
-                new_key = key.replace("time_mlp_in.", "action_time_mlp_in.")
-            elif key.startswith("time_mlp_out."):
-                new_key = key.replace("time_mlp_out.", "action_time_mlp_out.")
+            if new_key.startswith("time_mlp_in."):
+                new_key = new_key.replace("time_mlp_in.", "action_time_mlp_in.")
+            elif new_key.startswith("time_mlp_out."):
+                new_key = new_key.replace("time_mlp_out.", "action_time_mlp_out.")
 
             # Handle vision tower embedding layer potential differences
-            if "patch_embedding" in key:
+            if "patch_embedding" in key and key == new_key:
                 # Some checkpoints might have this, but current model expects different structure
                 logging.warning(f"Vision embedding key might need handling: {key}")
 
