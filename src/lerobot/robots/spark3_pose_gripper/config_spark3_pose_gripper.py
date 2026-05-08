@@ -31,6 +31,7 @@ class Spark3PoseGripperConfig(RobotConfig):
     connect_timeout_s: float = 10.0
     ros_node_name: str = "lerobot_spark3_pose_gripper"
     trigger_initial_pose_service: str | None = None
+    use_pi0_observation_state: bool = False
     joint_name_mapping: dict[str, str] = field(default_factory=default_joint_name_mapping)
     end_effectors: dict[str, Spark3EndEffectorConfig] = field(default_factory=default_end_effectors)
     sensors: dict[str, Spark3ObservationTopicConfig] = field(default_factory=dict)

@@ -18,6 +18,41 @@ DEFAULT_HEAD_POSE = [0.0, 0.0, 1.7, 0.0, 0.0, 0.0, 1.0]
 DEFAULT_HIP_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 DEFAULT_BASE_TWIST = [0.0, 0.0]
 
+PI0_OBSERVATION_STATE_NAMES = (
+    "left_arm_pose.x",
+    "left_arm_pose.y",
+    "left_arm_pose.z",
+    "left_arm_pose.qx",
+    "left_arm_pose.qy",
+    "left_arm_pose.qz",
+    "left_arm_pose.qw",
+    "right_arm_pose.x",
+    "right_arm_pose.y",
+    "right_arm_pose.z",
+    "right_arm_pose.qx",
+    "right_arm_pose.qy",
+    "right_arm_pose.qz",
+    "right_arm_pose.qw",
+    "arm_left_1.pos",
+    "arm_left_2.pos",
+    "arm_left_3.pos",
+    "arm_left_4.pos",
+    "arm_left_5.pos",
+    "arm_left_6.pos",
+    "arm_left_7.pos",
+    "arm_right_1.pos",
+    "arm_right_2.pos",
+    "arm_right_3.pos",
+    "arm_right_4.pos",
+    "arm_right_5.pos",
+    "arm_right_6.pos",
+    "arm_right_7.pos",
+    "head_pitch.pos",
+    "head_yaw.pos",
+    "left_gripper.pos",
+    "right_gripper.pos",
+)
+
 DEFAULT_JOINT_NAME_MAPPING = {
     "arm_left_1_joint": "arm_left_1",
     "arm_left_2_joint": "arm_left_2",
@@ -292,6 +327,7 @@ def observation_feature_dict(
     end_effectors: dict[str, Spark3EndEffectorConfig],
     sensors: dict[str, Spark3ObservationTopicConfig],
     camera_features: dict[str, tuple[int, int, int]],
+    state_names: tuple[str, ...] | None = None,
 ) -> dict[str, type | tuple[int, int, int]]:
     features: dict[str, type | tuple[int, int, int]] = {}
     features.update(pose_feature_dict("left_arm_pose"))
@@ -301,7 +337,23 @@ def observation_feature_dict(
     features.update(end_effector_feature_dict(end_effectors))
     features.update(sensor_feature_dict(sensors))
     features.update(camera_features)
+    if state_names is not None:
+        features = filter_observation_state(features, state_names, camera_features.keys())
     return features
+
+
+def filter_observation_state(
+    observation: dict[str, Any],
+    state_names: tuple[str, ...],
+    camera_names: Any,
+) -> dict[str, Any]:
+    camera_name_set = set(camera_names)
+    missing = [name for name in state_names if name not in observation]
+    if missing:
+        raise ValueError(f"Observation is missing configured state keys: {missing}")
+    filtered = {key: observation[key] for key in state_names}
+    filtered.update({key: value for key, value in observation.items() if key in camera_name_set})
+    return filtered
 
 
 def camera_feature_dict(camera_configs: dict[str, Any]) -> dict[str, tuple[int, int, int]]:

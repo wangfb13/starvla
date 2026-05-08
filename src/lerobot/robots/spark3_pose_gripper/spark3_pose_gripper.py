@@ -23,11 +23,13 @@ from .schema import (
     end_effector_dict,
     end_effector_values_from_action,
     expand_depth_frame,
+    filter_observation_state,
     observation_feature_dict,
     ordered_joint_names,
     parse_joint_state_message,
     parse_sensor_message_values,
     parse_state_pose_message,
+    PI0_OBSERVATION_STATE_NAMES,
     pose_values_from_action,
     sensor_dict,
     split_camera_observation,
@@ -181,6 +183,7 @@ class Spark3PoseGripper(Robot):
             end_effectors=self.config.end_effectors,
             sensors=self.config.sensors,
             camera_features=camera_feature_dict(self.config.cameras),
+            state_names=PI0_OBSERVATION_STATE_NAMES if self.config.use_pi0_observation_state else None,
         )
 
     @cached_property
@@ -361,6 +364,13 @@ class Spark3PoseGripper(Robot):
                 depth_frame = self._read_depth_frame(camera)
                 if depth_frame is not None:
                     obs[depth_key] = depth_frame
+
+        if self.config.use_pi0_observation_state:
+            obs = filter_observation_state(
+                obs,
+                PI0_OBSERVATION_STATE_NAMES,
+                camera_feature_dict(self.config.cameras).keys(),
+            )
 
         return obs
 
