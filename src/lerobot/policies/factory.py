@@ -23,7 +23,7 @@ from typing import Any, TypedDict, Unpack
 import torch
 
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.types import FeatureType
+from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.datasets.feature_utils import dataset_to_policy_features
 from lerobot.envs.configs import EnvConfig
@@ -54,6 +54,7 @@ from lerobot.processor.converters import (
 from lerobot.types import PolicyAction
 from lerobot.utils.constants import (
     ACTION,
+    OBS_STATE,
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
@@ -510,11 +511,40 @@ def make_policy(
     if not cfg.input_features:
         cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
 
-    # Store action feature names for relative_exclude_joints support
-    if ds_meta is not None and hasattr(cfg, "action_feature_names"):
+    # Store dataset feature names and optionally override policy IO for canonical mixed-arm PI0.5 training.
+    if ds_meta is not None:
         action_names = ds_meta.features.get(ACTION, {}).get("names")
-        if action_names is not None:
-            cfg.action_feature_names = list(action_names)
+        state_names = ds_meta.features.get(OBS_STATE, {}).get("names")
+
+        if hasattr(cfg, "source_action_feature_names"):
+            cfg.source_action_feature_names = list(action_names) if action_names is not None else None
+        if hasattr(cfg, "source_state_feature_names"):
+            cfg.source_state_feature_names = list(state_names) if state_names is not None else None
+
+        if getattr(cfg, "canonicalize_bimanual_rot6d", False):
+            from lerobot.policies.pi05.canonical_bimanual import (
+                canonical_action_feature_names,
+                canonical_state_feature_names,
+                extend_relative_exclude_joints,
+            )
+
+            cfg.output_features[ACTION] = PolicyFeature(
+                type=FeatureType.ACTION, shape=(cfg.canonical_action_dim,)
+            )
+            cfg.input_features[OBS_STATE] = PolicyFeature(
+                type=FeatureType.STATE, shape=(cfg.canonical_state_dim,)
+            )
+            cfg.action_feature_names = canonical_action_feature_names()
+            if hasattr(cfg, "state_feature_names"):
+                cfg.state_feature_names = canonical_state_feature_names()
+            if hasattr(cfg, "relative_exclude_joints"):
+                cfg.relative_exclude_joints = extend_relative_exclude_joints(
+                    getattr(cfg, "relative_exclude_joints", [])
+                )
+        elif hasattr(cfg, "action_feature_names"):
+            cfg.action_feature_names = list(action_names) if action_names is not None else None
+            if hasattr(cfg, "state_feature_names"):
+                cfg.state_feature_names = list(state_names) if state_names is not None else None
 
     kwargs["config"] = cfg
 

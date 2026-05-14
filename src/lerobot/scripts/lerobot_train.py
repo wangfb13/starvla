@@ -264,12 +264,24 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         )
         processor_pretrained_path = None
 
+    processor_stats = dataset.meta.stats
+    if cfg.policy.type == "pi05" and getattr(cfg.policy, "canonicalize_bimanual_rot6d", False):
+        from lerobot.policies.pi05.canonical_bimanual import build_canonical_bimanual_stats
+
+        processor_stats = build_canonical_bimanual_stats(
+            dataset,
+            source_state_names=getattr(cfg.policy, "source_state_feature_names", None),
+            source_action_names=getattr(cfg.policy, "source_action_feature_names", None),
+            missing_value=getattr(cfg.policy, "canonical_missing_value", None),
+            base_stats=dataset.meta.stats,
+        )
+
     # Create processors - only provide dataset_stats if not resuming from saved processors
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state
-        processor_kwargs["dataset_stats"] = dataset.meta.stats
+        processor_kwargs["dataset_stats"] = processor_stats
 
     # For SARM, always provide dataset_meta for progress normalization
     if cfg.policy.type == "sarm":
@@ -279,7 +291,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
             "normalizer_processor": {
-                "stats": dataset.meta.stats,
+                "stats": processor_stats,
                 "features": {**policy.config.input_features, **policy.config.output_features},
                 "norm_map": policy.config.normalization_mapping,
             },
@@ -289,7 +301,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         }
         postprocessor_kwargs["postprocessor_overrides"] = {
             "unnormalizer_processor": {
-                "stats": dataset.meta.stats,
+                "stats": processor_stats,
                 "features": policy.config.output_features,
                 "norm_map": policy.config.normalization_mapping,
             },

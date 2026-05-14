@@ -21,8 +21,13 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.configs.types import PipelineFeatureType, PolicyFeature
+from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.policies.pi05.canonical_bimanual import (
+    CANONICAL_ACTION_DIM,
+    CANONICAL_STATE_DIM,
+    canonicalize_bimanual_state_action,
+)
 from lerobot.processor import (
     AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
@@ -40,10 +45,108 @@ from lerobot.processor import (
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.types import EnvTransition, TransitionKey
 from lerobot.utils.constants import (
+    ACTION,
+    OBS_ACTION_MASK,
     OBS_STATE,
+    OBS_STATE_MASK,
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
+
+
+@ProcessorStepRegistry.register(name="pi05_canonicalize_bimanual_rot6d")
+@dataclass
+class Pi05CanonicalizeBimanualRot6DProcessorStep(ProcessorStep):
+    source_action_feature_names: list[str] | None = None
+    source_state_feature_names: list[str] | None = None
+    missing_value: float | None = 9930.0
+    action_mask_observation_key: str = OBS_ACTION_MASK
+    state_mask_observation_key: str = OBS_STATE_MASK
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        transition = transition.copy()
+        observation = dict(transition.get(TransitionKey.OBSERVATION, {}) or {})
+        state = observation.get(OBS_STATE)
+        if state is None:
+            return transition
+
+        action = transition.get(TransitionKey.ACTION)
+        canonical = canonicalize_bimanual_state_action(
+            state=state,
+            action=action,
+            source_state_names=self.source_state_feature_names,
+            source_action_names=self.source_action_feature_names,
+            missing_value=self.missing_value,
+        )
+
+        observation[OBS_STATE] = canonical[OBS_STATE]
+        observation[self.state_mask_observation_key] = canonical["state_mask"]
+        observation[self.action_mask_observation_key] = canonical.get("action_mask", canonical["state_mask"])
+        transition[TransitionKey.OBSERVATION] = observation
+
+        if action is not None and ACTION in canonical:
+            transition[TransitionKey.ACTION] = canonical[ACTION]
+
+        return transition
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        transformed = {ptype: feats.copy() for ptype, feats in features.items()}
+        transformed.setdefault(PipelineFeatureType.OBSERVATION, {})
+        transformed.setdefault(PipelineFeatureType.ACTION, {})
+
+        transformed[PipelineFeatureType.OBSERVATION][OBS_STATE] = PolicyFeature(
+            type=FeatureType.STATE,
+            shape=(CANONICAL_STATE_DIM,),
+        )
+        transformed[PipelineFeatureType.OBSERVATION][self.state_mask_observation_key] = PolicyFeature(
+            type=FeatureType.STATE,
+            shape=(CANONICAL_ACTION_DIM,),
+        )
+        transformed[PipelineFeatureType.OBSERVATION][self.action_mask_observation_key] = PolicyFeature(
+            type=FeatureType.STATE,
+            shape=(CANONICAL_ACTION_DIM,),
+        )
+        transformed[PipelineFeatureType.ACTION][ACTION] = PolicyFeature(
+            type=FeatureType.ACTION,
+            shape=(CANONICAL_ACTION_DIM,),
+        )
+        return transformed
+
+
+@ProcessorStepRegistry.register(name="pi05_apply_masks_processor_step")
+@dataclass
+class Pi05ApplyMasksProcessorStep(ProcessorStep):
+    action_mask_observation_key: str = OBS_ACTION_MASK
+    state_mask_observation_key: str = OBS_STATE_MASK
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        transition = transition.copy()
+        observation = dict(transition.get(TransitionKey.OBSERVATION, {}) or {})
+
+        state = observation.get(OBS_STATE)
+        state_mask = observation.get(self.state_mask_observation_key)
+        if state is not None and state_mask is not None:
+            state = state.clone()
+            state_mask = state_mask.to(dtype=state.dtype, device=state.device)
+            masked_dims = min(state_mask.shape[-1], state.shape[-1])
+            state[..., :masked_dims] = state[..., :masked_dims] * state_mask[..., :masked_dims]
+            observation[OBS_STATE] = state
+            transition[TransitionKey.OBSERVATION] = observation
+
+        action = transition.get(TransitionKey.ACTION)
+        action_mask = observation.get(self.action_mask_observation_key)
+        if action is not None and action_mask is not None:
+            action_mask = action_mask.to(dtype=action.dtype, device=action.device)
+            transition[TransitionKey.ACTION] = action * action_mask
+
+        return transition
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
 
 
 @ProcessorStepRegistry.register(name="pi05_prepare_state_tokenizer_processor_step")
@@ -137,23 +240,42 @@ def make_pi05_pre_post_processors(
     input_steps: list[ProcessorStep] = [
         RenameObservationsProcessorStep(rename_map={}),  # To mimic the same processor as pretrained one
         AddBatchDimensionProcessorStep(),
-        relative_step,
-        # NOTE: NormalizerProcessorStep MUST come before Pi05PrepareStateTokenizerProcessorStep
-        # because the tokenizer step expects normalized state in [-1, 1] range for discretization
-        NormalizerProcessorStep(
-            features={**config.input_features, **config.output_features},
-            norm_map=config.normalization_mapping,
-            stats=dataset_stats,
-        ),
-        Pi05PrepareStateTokenizerProcessorStep(max_state_dim=config.max_state_dim),
-        TokenizerProcessorStep(
-            tokenizer_name="google/paligemma-3b-pt-224",
-            max_length=config.tokenizer_max_length,
-            padding_side="right",
-            padding="max_length",
-        ),
-        DeviceProcessorStep(device=config.device),
     ]
+    if config.canonicalize_bimanual_rot6d:
+        input_steps.append(
+            Pi05CanonicalizeBimanualRot6DProcessorStep(
+                source_action_feature_names=config.source_action_feature_names,
+                source_state_feature_names=config.source_state_feature_names,
+                missing_value=config.canonical_missing_value,
+                action_mask_observation_key=config.action_mask_observation_key,
+                state_mask_observation_key=config.state_mask_observation_key,
+            )
+        )
+
+    input_steps.extend(
+        [
+            relative_step,
+            # NOTE: NormalizerProcessorStep MUST come before Pi05PrepareStateTokenizerProcessorStep
+            # because the tokenizer step expects normalized state in [-1, 1] range for discretization
+            NormalizerProcessorStep(
+                features={**config.input_features, **config.output_features},
+                norm_map=config.normalization_mapping,
+                stats=dataset_stats,
+            ),
+            Pi05ApplyMasksProcessorStep(
+                action_mask_observation_key=config.action_mask_observation_key,
+                state_mask_observation_key=config.state_mask_observation_key,
+            ),
+            Pi05PrepareStateTokenizerProcessorStep(max_state_dim=config.max_state_dim),
+            TokenizerProcessorStep(
+                tokenizer_name="google/paligemma-3b-pt-224",
+                max_length=config.tokenizer_max_length,
+                padding_side="right",
+                padding="max_length",
+            ),
+            DeviceProcessorStep(device=config.device),
+        ]
+    )
 
     output_steps: list[ProcessorStep] = [
         UnnormalizerProcessorStep(

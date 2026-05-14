@@ -21,7 +21,7 @@ from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.policies.rtc.configuration_rtc import RTCConfig
-from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ACTION_MASK, OBS_IMAGES, OBS_STATE, OBS_STATE_MASK
 
 DEFAULT_IMAGE_SIZE = 224
 
@@ -56,6 +56,17 @@ class PI05Config(PreTrainedConfig):
     relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
     # Populated at runtime from dataset metadata by make_policy.
     action_feature_names: list[str] | None = None
+    state_feature_names: list[str] | None = None
+    source_action_feature_names: list[str] | None = None
+    source_state_feature_names: list[str] | None = None
+
+    # Canonical mixed single-arm / dual-arm representation used before normalization.
+    canonicalize_bimanual_rot6d: bool = False
+    canonical_missing_value: float | None = 9930.0
+    canonical_action_dim: int = 20
+    canonical_state_dim: int = 22
+    action_mask_observation_key: str = OBS_ACTION_MASK
+    state_mask_observation_key: str = OBS_STATE_MASK
 
     # Real-Time Chunking (RTC) configuration
     rtc_config: RTCConfig | None = None
@@ -135,14 +146,14 @@ class PI05Config(PreTrainedConfig):
         if OBS_STATE not in self.input_features:
             state_feature = PolicyFeature(
                 type=FeatureType.STATE,
-                shape=(self.max_state_dim,),  # Padded to max_state_dim
+                shape=((self.canonical_state_dim,) if self.canonicalize_bimanual_rot6d else (self.max_state_dim,)),
             )
             self.input_features[OBS_STATE] = state_feature
 
         if ACTION not in self.output_features:
             action_feature = PolicyFeature(
                 type=FeatureType.ACTION,
-                shape=(self.max_action_dim,),  # Padded to max_action_dim
+                shape=((self.canonical_action_dim,) if self.canonicalize_bimanual_rot6d else (self.max_action_dim,)),
             )
             self.output_features[ACTION] = action_feature
 

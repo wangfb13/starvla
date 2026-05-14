@@ -52,6 +52,7 @@ from lerobot.policies.pretrained import PreTrainedPolicy, T
 from lerobot.policies.rtc.modeling_rtc import RTCProcessor
 from lerobot.utils.constants import (
     ACTION,
+    OBS_ACTION_MASK,
     OBS_LANGUAGE_ATTENTION_MASK,
     OBS_LANGUAGE_TOKENS,
     OPENPI_ATTENTION_MASK_VALUE,
@@ -727,10 +728,18 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, images, img_masks, tokens, masks, actions, noise=None, time=None) -> Tensor:
+    def forward(self, images, img_masks, tokens, masks, actions, action_mask=None, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss."""
+        if action_mask is not None:
+            action_mask = action_mask.to(device=actions.device, dtype=actions.dtype)
+            if action_mask.ndim == 2:
+                action_mask = action_mask[:, None, :]
+            actions = actions * action_mask
+
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
+        if action_mask is not None:
+            noise = noise * action_mask
 
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
@@ -780,7 +789,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        losses = F.mse_loss(u_t, v_t, reduction="none")
+        if action_mask is not None:
+            losses = losses * action_mask
+        return losses
 
     @torch.no_grad()  # see openpi `sample_actions` (slightly adapted)
     def sample_actions(
@@ -789,6 +801,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         img_masks,
         tokens,
         masks,
+        action_mask=None,
         noise=None,
         num_steps=None,
         **kwargs: Unpack[ActionSelectKwargs],
@@ -808,6 +821,12 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                 self.config.max_action_dim,
             )  # Use config max_action_dim for internal processing
             noise = self.sample_noise(actions_shape, device)
+
+        if action_mask is not None:
+            action_mask = action_mask.to(device=device, dtype=noise.dtype)
+            if action_mask.ndim == 2:
+                action_mask = action_mask[:, None, :].expand(bsize, self.config.chunk_size, -1)
+            noise = noise * action_mask
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
@@ -855,7 +874,11 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             else:
                 v_t = denoise_step_partial_call(x_t)
 
+            if action_mask is not None:
+                v_t = v_t * action_mask
             x_t = x_t + dt * v_t
+            if action_mask is not None:
+                x_t = x_t * action_mask
 
             if self.rtc_processor is not None and self.rtc_processor.is_debug_enabled():
                 self.rtc_processor.track(time=time, x_t=x_t, v_t=v_t)
@@ -1210,6 +1233,12 @@ class PI05Policy(PreTrainedPolicy):
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
         return actions
 
+    def prepare_action_mask(self, batch):
+        action_mask = batch.get(self.config.action_mask_observation_key, batch.get(OBS_ACTION_MASK))
+        if action_mask is None:
+            return None
+        return pad_vector(action_mask, self.config.max_action_dim)
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations."""
@@ -1235,13 +1264,19 @@ class PI05Policy(PreTrainedPolicy):
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        action_mask = self.prepare_action_mask(batch)
 
         # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
-        actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
+        actions = self.model.sample_actions(images, img_masks, tokens, masks, action_mask=action_mask, **kwargs)
 
         # Unpad actions to actual action dimension
         original_action_dim = self.config.output_features[ACTION].shape[0]
         actions = actions[:, :, :original_action_dim]
+        if action_mask is not None:
+            action_mask = action_mask[..., :original_action_dim]
+            if action_mask.ndim == 2:
+                action_mask = action_mask[:, None, :]
+            actions = actions * action_mask
 
         return actions
 
@@ -1259,26 +1294,45 @@ class PI05Policy(PreTrainedPolicy):
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.prepare_action(batch)
+        action_mask = self.prepare_action_mask(batch)
 
         # Compute loss (no separate state needed for PI05)
-        losses = self.model.forward(images, img_masks, tokens, masks, actions)
+        losses = self.model.forward(images, img_masks, tokens, masks, actions, action_mask=action_mask)
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]
+        expanded_action_mask = None
+        if action_mask is not None:
+            expanded_action_mask = action_mask[..., :original_action_dim]
+            if expanded_action_mask.ndim == 2:
+                expanded_action_mask = expanded_action_mask[:, None, :]
+
+        if expanded_action_mask is not None:
+            per_dim_denom = expanded_action_mask.sum(dim=[0, 1]).clamp_min(1.0)
+            loss_per_dim = losses.sum(dim=[0, 1]) / per_dim_denom
+        else:
+            loss_per_dim = losses.mean(dim=[0, 1])
 
         loss_dict = {
-            "loss_per_dim": losses.mean(dim=[0, 1]).detach().cpu().numpy().tolist(),
+            "loss_per_dim": loss_per_dim.detach().cpu().numpy().tolist(),
         }
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
-            per_sample_loss = losses.mean(dim=(1, 2))
+            if expanded_action_mask is not None:
+                per_sample_denom = expanded_action_mask.sum(dim=(1, 2)).clamp_min(1.0)
+                per_sample_loss = losses.sum(dim=(1, 2)) / per_sample_denom
+            else:
+                per_sample_loss = losses.mean(dim=(1, 2))
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
         else:
             # Default: return scalar mean loss
-            loss = losses.mean()
+            if expanded_action_mask is not None:
+                loss = losses.sum() / expanded_action_mask.sum().clamp_min(1.0)
+            else:
+                loss = losses.mean()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
 
