@@ -148,9 +148,17 @@ def decode_video_frames(
     """
     if backend is None:
         backend = get_safe_default_codec()
+    video_path_str = str(video_path).lower()
+    if video_path_str.endswith(".mov"):
+        backend = "pyav"
     if backend == "torchcodec":
         return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
     elif backend in ["pyav", "video_reader"]:
+        if video_path_str.endswith(".mov"):
+            decode_format = "gray16le"
+            if any(token in video_path_str for token in ("deformation", "shear")):
+                decode_format = "gbrp16le"
+            return decode_video_frames_av(video_path, timestamps, tolerance_s, decode_format)
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
         raise ValueError(f"Unsupported video backend: {backend}")
@@ -256,6 +264,91 @@ def decode_video_frames_torchvision(
             f"Number of retrieved frames ({len(closest_frames)}) does not match "
             f"number of queried timestamps ({len(timestamps)})"
         )
+    return closest_frames
+
+
+def decode_video_frames_av(
+    video_path: Path | str,
+    timestamps: list[float],
+    tolerance_s: float,
+    decode_format: str,
+    log_loaded_timestamps: bool = False,
+) -> torch.Tensor:
+    """Load frames from a high-bit-depth `.mov` video using PyAV directly."""
+    video_path = str(video_path)
+
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+    time_base = float(video_stream.time_base)
+
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+
+    container.seek(int(first_ts / time_base), stream=video_stream, any_frame=False, backward=True)
+    target_fps = float(video_stream.average_rate)
+
+    loaded_frames = []
+    loaded_ts = []
+
+    for frame in container.decode(video_stream):
+        raw_ts = float(frame.pts * time_base)
+        frame_idx = round(raw_ts * target_fps)
+        current_ts = frame_idx / target_fps
+
+        if log_loaded_timestamps:
+            logger.info(f"frame loaded at timestamp={current_ts:.4f}")
+
+        loaded_frames.append(torch.tensor(frame.to_ndarray(format=decode_format)))
+        loaded_ts.append(current_ts)
+        if current_ts >= last_ts:
+            break
+
+    container.close()
+
+    query_ts = torch.tensor(timestamps)
+    loaded_ts = torch.tensor(loaded_ts)
+
+    dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
+    min_, argmin_ = dist.min(1)
+
+    is_within_tol = min_ < tolerance_s
+    if not is_within_tol.all():
+        raise FrameTimestampError(
+            f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
+            " It means that the closest frame that can be loaded from the video is too far away in time."
+            " This might be due to synchronization issues with timestamps during data collection."
+            " To be safe, we advise to ignore this item during training."
+            f"\nqueried timestamps: {query_ts}"
+            f"\nloaded timestamps: {loaded_ts}"
+            f"\nvideo: {video_path}"
+        )
+
+    closest_frames = torch.stack([loaded_frames[idx] for idx in argmin_])
+    closest_ts = loaded_ts[argmin_]
+
+    if log_loaded_timestamps:
+        logger.info(f"{closest_ts=}")
+
+    video_path_lower = video_path.lower()
+    if "tactile" in video_path_lower:
+        if "depth" in video_path_lower:
+            closest_frames = closest_frames.type(torch.float32) / 3500.0
+        elif any(token in video_path_lower for token in ("deformation", "shear")):
+            closest_frames = (closest_frames.type(torch.float32) - 25000.0) / 10000.0
+            closest_frames = torch.clamp(closest_frames, 0.0, 1.0)
+            if closest_frames.ndim == 4 and closest_frames.shape[-1] == 3:
+                closest_frames = closest_frames[..., :2].permute(0, 3, 1, 2)
+            elif closest_frames.ndim == 3:
+                closest_frames = closest_frames[:, :2]
+    else:
+        closest_frames = closest_frames.type(torch.float32) / 255.0
+
+    if len(timestamps) != len(closest_frames):
+        raise FrameTimestampError(
+            f"Number of retrieved frames ({len(closest_frames)}) does not match "
+            f"number of queried timestamps ({len(timestamps)})"
+        )
+
     return closest_frames
 
 

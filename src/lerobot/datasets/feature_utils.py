@@ -26,6 +26,7 @@ from lerobot.datasets.utils import (
     DEFAULT_DATA_FILE_SIZE_IN_MB,
     DEFAULT_DATA_PATH,
     DEFAULT_FEATURES,
+    DEFAULT_MOV_PATH,
     DEFAULT_VIDEO_FILE_SIZE_IN_MB,
     DEFAULT_VIDEO_PATH,
 )
@@ -47,7 +48,7 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
     """
     hf_features = {}
     for key, ft in features.items():
-        if ft["dtype"] == "video":
+        if ft["dtype"] in ["video", "tactile", "depth"]:
             continue
         elif ft["dtype"] == "image":
             hf_features[key] = datasets.Image()
@@ -160,7 +161,7 @@ def build_dataset_frame(
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:
             frame[key] = np.array([values[name] for name in ft["names"]], dtype=np.float32)
-        elif ft["dtype"] in ["image", "video"]:
+        elif ft["dtype"] in ["image", "video", "tactile", "depth"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
 
     return frame
@@ -186,7 +187,7 @@ def dataset_to_policy_features(features: dict[str, dict]) -> dict[str, PolicyFea
     policy_features = {}
     for key, ft in features.items():
         shape = ft["shape"]
-        if ft["dtype"] in ["image", "video"]:
+        if ft["dtype"] in ["image", "video", "tactile", "depth"]:
             type = FeatureType.VISUAL
             if len(shape) != 3:
                 raise ValueError(f"Number of dimensions of {key} != 3 (shape={shape})")
@@ -299,6 +300,7 @@ def create_empty_dataset_info(
         "splits": {},
         "data_path": DEFAULT_DATA_PATH,
         "video_path": DEFAULT_VIDEO_PATH if use_videos else None,
+        "mov_path": DEFAULT_MOV_PATH if use_videos else None,
         "features": features,
     }
 

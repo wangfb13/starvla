@@ -737,11 +737,10 @@ def _copy_and_reindex_videos(
             all_in_file_set = set(all_episodes_in_file)
 
             if all_in_file_set == episodes_to_keep_set:
-                assert src_dataset.meta.video_path is not None
-                src_video_path = src_dataset.root / src_dataset.meta.video_path.format(
+                src_video_path = src_dataset.root / src_dataset.meta.get_video_file_path_from_indices(
                     video_key=video_key, chunk_index=src_chunk_idx, file_index=src_file_idx
                 )
-                dst_video_path = dst_meta.root / dst_meta.video_path.format(
+                dst_video_path = dst_meta.root / dst_meta.get_video_file_path_from_indices(
                     video_key=video_key, chunk_index=src_chunk_idx, file_index=src_file_idx
                 )
                 dst_video_path.parent.mkdir(parents=True, exist_ok=True)
@@ -772,11 +771,10 @@ def _copy_and_reindex_videos(
                     episodes_to_keep_ranges.append((from_frame, to_frame))
 
                 # Use PyAV filters to efficiently re-encode only the desired segments.
-                assert src_dataset.meta.video_path is not None
-                src_video_path = src_dataset.root / src_dataset.meta.video_path.format(
+                src_video_path = src_dataset.root / src_dataset.meta.get_video_file_path_from_indices(
                     video_key=video_key, chunk_index=src_chunk_idx, file_index=src_file_idx
                 )
-                dst_video_path = dst_meta.root / dst_meta.video_path.format(
+                dst_video_path = dst_meta.root / dst_meta.get_video_file_path_from_indices(
                     video_key=video_key, chunk_index=src_chunk_idx, file_index=src_file_idx
                 )
                 dst_video_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1811,7 +1809,7 @@ def convert_image_to_video_dataset(
                 )
 
                 # Encode all batched episodes into single video
-                video_path = new_meta.root / new_meta.video_path.format(
+                video_path = new_meta.root / new_meta.get_video_file_path_from_indices(
                     video_key=img_key, chunk_index=chunk_idx, file_index=file_idx
                 )
                 video_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1867,7 +1865,7 @@ def convert_image_to_video_dataset(
         # We need to manually set video info since update_video_info() checks video_keys first
         for img_key in img_keys:
             if not new_meta.features[img_key].get("info", None):
-                video_path = new_meta.root / new_meta.video_path.format(
+                video_path = new_meta.root / new_meta.get_video_file_path_from_indices(
                     video_key=img_key, chunk_index=0, file_index=0
                 )
                 new_meta.info["features"][img_key]["info"] = get_video_info(video_path)

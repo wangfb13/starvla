@@ -54,6 +54,12 @@ from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE
 CODEBASE_VERSION = "v3.0"
 
 
+def _uses_mov_container(video_key: str) -> bool:
+    """Return whether a video key should be stored in a `.mov` container."""
+    lowered = video_key.lower()
+    return any(token in lowered for token in ("deformation", "shear", "depth"))
+
+
 class LeRobotDatasetMetadata:
     """Metadata container for a LeRobot dataset.
 
@@ -266,7 +272,26 @@ class LeRobotDatasetMetadata:
         ep = self.episodes[ep_index]
         chunk_idx = ep[f"videos/{vid_key}/chunk_index"]
         file_idx = ep[f"videos/{vid_key}/file_index"]
-        fpath = self.video_path.format(video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx)
+        return self.get_video_file_path_from_indices(vid_key, chunk_idx, file_idx)
+
+    def get_video_file_path_from_indices(self, video_key: str, chunk_index: int, file_index: int) -> Path:
+        """Return the relative video path for a known `(chunk_index, file_index)` pair."""
+        if _uses_mov_container(video_key):
+            if self.mov_path is None:
+                raise ValueError(
+                    f"Video key '{video_key}' requires mov_path metadata, but info.json does not define mov_path."
+                )
+            fpath = self.mov_path.format(
+                video_key=video_key,
+                chunk_index=chunk_index,
+                file_index=file_index,
+            )
+        else:
+            fpath = self.video_path.format(
+                video_key=video_key,
+                chunk_index=chunk_index,
+                file_index=file_index,
+            )
         return Path(fpath)
 
     @property
@@ -278,6 +303,11 @@ class LeRobotDatasetMetadata:
     def video_path(self) -> str | None:
         """Formattable string for the video files."""
         return self.info["video_path"]
+
+    @property
+    def mov_path(self) -> str | None:
+        """Formattable string for mov-backed video files."""
+        return self.info.get("mov_path")
 
     @property
     def robot_type(self) -> str | None:
@@ -302,12 +332,16 @@ class LeRobotDatasetMetadata:
     @property
     def video_keys(self) -> list[str]:
         """Keys to access visual modalities stored as videos."""
-        return [key for key, ft in self.features.items() if ft["dtype"] == "video"]
+        return [key for key, ft in self.features.items() if ft["dtype"] in ["video", "tactile", "depth"]]
 
     @property
     def camera_keys(self) -> list[str]:
         """Keys to access visual modalities (regardless of their storage method)."""
-        return [key for key, ft in self.features.items() if ft["dtype"] in ["video", "image"]]
+        return [
+            key
+            for key, ft in self.features.items()
+            if ft["dtype"] in ["video", "image", "tactile", "depth"]
+        ]
 
     @property
     def names(self) -> dict[str, list | dict]:
@@ -512,7 +546,7 @@ class LeRobotDatasetMetadata:
         video_keys = [video_key] if video_key is not None else self.video_keys
         for key in video_keys:
             if not self.features[key].get("info", None):
-                video_path = self.root / self.video_path.format(video_key=key, chunk_index=0, file_index=0)
+                video_path = self.root / self.get_video_file_path(0, key)
                 self.info["features"][key]["info"] = get_video_info(video_path)
 
     def update_chunk_settings(

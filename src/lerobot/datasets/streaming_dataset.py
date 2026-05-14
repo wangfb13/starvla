@@ -31,10 +31,7 @@ from lerobot.datasets.utils import (
     is_float_in_list,
     safe_shard,
 )
-from lerobot.datasets.video_utils import (
-    VideoDecoderCache,
-    decode_video_frames_torchcodec,
-)
+from lerobot.datasets.video_utils import VideoDecoderCache, decode_video_frames
 from lerobot.utils.constants import HF_LEROBOT_HOME, LOOKAHEAD_BACKTRACKTABLE, LOOKBACK_BACKTRACKTABLE
 
 
@@ -551,9 +548,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         for video_key, query_ts in query_timestamps.items():
             root = self.meta.url_root if self.streaming and not self.streaming_from_local else self.root
             video_path = f"{root}/{self.meta.get_video_file_path(ep_idx, video_key)}"
-            frames = decode_video_frames_torchcodec(
-                video_path, query_ts, self.tolerance_s, decoder_cache=self.video_decoder_cache
-            )
+            frames = decode_video_frames(video_path, query_ts, self.tolerance_s)
 
             item[video_key] = frames.squeeze(0) if len(query_ts) == 1 else frames
 

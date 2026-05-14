@@ -40,7 +40,6 @@ from lerobot.datasets.utils import (
     DEFAULT_DATA_PATH,
     DEFAULT_EPISODES_PATH,
     DEFAULT_VIDEO_FILE_SIZE_IN_MB,
-    DEFAULT_VIDEO_PATH,
     update_chunk_file_indices,
 )
 from lerobot.datasets.video_utils import concatenate_video_files, get_video_duration_in_s
@@ -363,16 +362,12 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
         dst_file_durations = video_idx["dst_file_durations"]
 
         for src_chunk_idx, src_file_idx in unique_chunk_file_pairs:
-            src_path = src_meta.root / DEFAULT_VIDEO_PATH.format(
-                video_key=key,
-                chunk_index=src_chunk_idx,
-                file_index=src_file_idx,
+            src_path = src_meta.root / src_meta.get_video_file_path_from_indices(
+                video_key=key, chunk_index=src_chunk_idx, file_index=src_file_idx
             )
 
-            dst_path = dst_meta.root / DEFAULT_VIDEO_PATH.format(
-                video_key=key,
-                chunk_index=chunk_idx,
-                file_index=file_idx,
+            dst_path = dst_meta.root / dst_meta.get_video_file_path_from_indices(
+                video_key=key, chunk_index=chunk_idx, file_index=file_idx
             )
 
             src_duration = get_video_duration_in_s(src_path)
@@ -399,10 +394,8 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
                 dst_key = (chunk_idx, file_idx)
                 videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
                 videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = dst_key
-                dst_path = dst_meta.root / DEFAULT_VIDEO_PATH.format(
-                    video_key=key,
-                    chunk_index=chunk_idx,
-                    file_index=file_idx,
+                dst_path = dst_meta.root / dst_meta.get_video_file_path_from_indices(
+                    video_key=key, chunk_index=chunk_idx, file_index=file_idx
                 )
                 dst_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(str(src_path), str(dst_path))

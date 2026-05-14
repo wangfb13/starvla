@@ -33,6 +33,7 @@ import torch
 
 from lerobot.datasets.compute_stats import compute_episode_stats
 from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+from lerobot.datasets.dataset_metadata import _uses_mov_container
 from lerobot.datasets.feature_utils import (
     get_hf_features_from_features,
     validate_episode_buffer,
@@ -68,7 +69,8 @@ def _encode_video_worker(
     vcodec: str = "libsvtav1",
     encoder_threads: int | None = None,
 ) -> Path:
-    temp_path = Path(tempfile.mkdtemp(dir=root)) / f"{video_key}_{episode_index:03d}.mp4"
+    suffix = ".mov" if _uses_mov_container(video_key) else ".mp4"
+    temp_path = Path(tempfile.mkdtemp(dir=root)) / f"{video_key}_{episode_index:03d}{suffix}"
     fpath = DEFAULT_IMAGE_PATH.format(image_key=video_key, episode_index=episode_index, frame_index=0)
     img_dir = (root / fpath).parent
     encode_video_frames(
@@ -196,16 +198,16 @@ class DatasetWriter:
                     f"An element of the frame is not in the features. '{key}' not in '{self._meta.features.keys()}'."
                 )
 
-            if self._meta.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
+            if self._meta.features[key]["dtype"] in ["video", "tactile", "depth"] and self._streaming_encoder is not None:
                 self._streaming_encoder.feed_frame(key, frame[key])
                 self.episode_buffer[key].append(None)
-            elif self._meta.features[key]["dtype"] in ["image", "video"]:
+            elif self._meta.features[key]["dtype"] in ["image", "video", "tactile", "depth"]:
                 img_path = self._get_image_file_path(
                     episode_index=self.episode_buffer["episode_index"], image_key=key, frame_index=frame_index
                 )
                 if frame_index == 0:
                     img_path.parent.mkdir(parents=True, exist_ok=True)
-                compress_level = 1 if self._meta.features[key]["dtype"] == "video" else 6
+                compress_level = 1 if self._meta.features[key]["dtype"] in ["video", "tactile", "depth"] else 6
                 self._save_image(frame[key], img_path, compress_level)
                 self.episode_buffer[key].append(str(img_path))
             else:
@@ -239,7 +241,7 @@ class DatasetWriter:
         episode_buffer["task_index"] = np.array([self._meta.get_task_index(task) for task in tasks])
 
         for key, ft in self._meta.features.items():
-            if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video"]:
+            if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video", "tactile", "depth"]:
                 continue
             episode_buffer[key] = np.stack(episode_buffer[key])
 
@@ -254,7 +256,7 @@ class DatasetWriter:
             non_video_buffer = {
                 k: v
                 for k, v in episode_buffer.items()
-                if self._meta.features.get(k, {}).get("dtype") not in ("video",)
+                if self._meta.features.get(k, {}).get("dtype") not in ("video", "tactile", "depth")
             }
             non_video_features = {k: v for k, v in self._meta.features.items() if v["dtype"] != "video"}
             ep_stats = compute_episode_stats(non_video_buffer, non_video_features)
@@ -460,7 +462,7 @@ class DatasetWriter:
                     old_chunk_idx, old_file_idx, self._meta.chunks_size
                 )
             latest_duration_in_s = 0.0
-            new_path = self._root / self._meta.video_path.format(
+            new_path = self._root / self._meta.get_video_file_path_from_indices(
                 video_key=video_key, chunk_index=chunk_idx, file_index=file_idx
             )
             new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -470,7 +472,7 @@ class DatasetWriter:
             chunk_idx = latest_ep[f"videos/{video_key}/chunk_index"][0]
             file_idx = latest_ep[f"videos/{video_key}/file_index"][0]
 
-            latest_path = self._root / self._meta.video_path.format(
+            latest_path = self._root / self._meta.get_video_file_path_from_indices(
                 video_key=video_key, chunk_index=chunk_idx, file_index=file_idx
             )
             latest_size_in_mb = get_file_size_in_mb(latest_path)
@@ -478,7 +480,7 @@ class DatasetWriter:
 
             if latest_size_in_mb + ep_size_in_mb >= self._meta.video_files_size_in_mb:
                 chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, self._meta.chunks_size)
-                new_path = self._root / self._meta.video_path.format(
+                new_path = self._root / self._meta.get_video_file_path_from_indices(
                     video_key=video_key, chunk_index=chunk_idx, file_index=file_idx
                 )
                 new_path.parent.mkdir(parents=True, exist_ok=True)
