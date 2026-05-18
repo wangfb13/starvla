@@ -47,6 +47,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self,
         repo_id: str,
         root: str | Path | None = None,
+        info_path: str | Path | None = None,
         episodes: list[int] | None = None,
         image_transforms: Callable | None = None,
         delta_timestamps: dict[str, list[float]] | None = None,
@@ -194,6 +195,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         super().__init__()
         self.repo_id = repo_id
         self._requested_root = Path(root) if root else None
+        self._info_path = Path(info_path) if info_path is not None else None
         self.reader = None
         self.set_image_transforms(image_transforms)
         self.delta_timestamps = delta_timestamps
@@ -210,7 +212,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Load metadata (sets self.root once from the resolved metadata root)
         self.meta = LeRobotDatasetMetadata(
-            self.repo_id, self._requested_root, self.revision, force_cache_sync=force_cache_sync
+            self.repo_id,
+            self._requested_root,
+            self.revision,
+            force_cache_sync=force_cache_sync,
+            info_path=self._info_path,
         )
         self.root = self.meta.root
         self.revision = self.meta.revision

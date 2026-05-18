@@ -132,6 +132,9 @@ class TrainPipelineConfig(HubMixin):
         if self.dataset.repo_id is None and not self.dataset.root:
             raise ValueError("Either `dataset.repo_id` or `dataset.root` must be provided.")
 
+        if self.dataset.info_path and not self.dataset.root:
+            raise ValueError("`dataset.info_path` is only supported together with a local `dataset.root`.")
+
         if self.dataset.streaming and isinstance(self.dataset.repo_id, list):
             raise NotImplementedError("Streaming datasets are not supported with multiple dataset repo_ids.")
 

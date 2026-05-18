@@ -75,6 +75,7 @@ class LeRobotDatasetMetadata:
         revision: str | None = None,
         force_cache_sync: bool = False,
         metadata_buffer_size: int = 10,
+        info_path: str | Path | None = None,
     ):
         """Load or download metadata for an existing LeRobot dataset.
 
@@ -101,6 +102,7 @@ class LeRobotDatasetMetadata:
         self.revision = revision if revision else CODEBASE_VERSION
         self._requested_root = Path(root) if root is not None else None
         self.root = self._requested_root if self._requested_root is not None else HF_LEROBOT_HOME / repo_id
+        self._info_path = Path(info_path) if info_path is not None else None
         self._pq_writer = None
         self.latest_episode = None
         self._metadata_buffer: list[dict] = []
@@ -179,7 +181,7 @@ class LeRobotDatasetMetadata:
             self.finalize()
 
     def _load_metadata(self):
-        self.info = load_info(self.root)
+        self.info = load_info(self.root, info_path=self._info_path)
         check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
         self.tasks = load_tasks(self.root)
         self.subtasks = load_subtasks(self.root)

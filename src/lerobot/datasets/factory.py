@@ -43,6 +43,18 @@ def _is_local_lerobot_dataset(root: Path) -> bool:
     )
 
 
+def _resolve_local_info_path(info_path: str | Path | None, root: str | Path | None) -> Path | None:
+    if info_path is None:
+        return None
+
+    resolved = Path(info_path)
+    if not resolved.is_absolute():
+        if root is None:
+            raise ValueError("`dataset.info_path` requires `dataset.root` when given as a relative path.")
+        resolved = Path(root) / resolved
+    return resolved
+
+
 def _discover_child_datasets(root: Path) -> list[str]:
     if not root.exists() or not root.is_dir():
         return []
@@ -53,15 +65,17 @@ def _build_single_dataset(
     *,
     repo_id: str,
     root: str | Path | None,
+    info_path: str | Path | None,
     cfg: TrainPipelineConfig,
     image_transforms: ImageTransforms | None,
 ):
-    ds_meta = LeRobotDatasetMetadata(repo_id, root=root, revision=cfg.dataset.revision)
+    ds_meta = LeRobotDatasetMetadata(repo_id, root=root, revision=cfg.dataset.revision, info_path=info_path)
     delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
     if not cfg.dataset.streaming:
         return LeRobotDataset(
             repo_id,
             root=root,
+            info_path=info_path,
             episodes=cfg.dataset.episodes,
             delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
@@ -73,6 +87,7 @@ def _build_single_dataset(
     return StreamingLeRobotDataset(
         repo_id,
         root=root,
+        info_path=info_path,
         episodes=cfg.dataset.episodes,
         delta_timestamps=delta_timestamps,
         image_transforms=image_transforms,
@@ -95,6 +110,9 @@ def _build_multi_dataset(
         raise NotImplementedError(
             "`dataset.episodes` is not supported when `dataset.root` resolves to multiple datasets."
         )
+
+    if cfg.dataset.info_path is not None:
+        raise NotImplementedError("`dataset.info_path` is only supported for a single local dataset.")
 
     first_root = None if root is None else Path(root) / repo_ids[0]
     ds_meta = LeRobotDatasetMetadata(repo_ids[0], root=first_root, revision=cfg.dataset.revision)
@@ -164,6 +182,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
 
     dataset_root = Path(cfg.dataset.root) if cfg.dataset.root is not None else None
     discovered_repo_ids = _discover_child_datasets(dataset_root) if dataset_root is not None else []
+    resolved_info_path = _resolve_local_info_path(cfg.dataset.info_path, dataset_root)
 
     if dataset_root is not None and _is_local_lerobot_dataset(dataset_root):
         if isinstance(cfg.dataset.repo_id, list):
@@ -174,6 +193,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         dataset = _build_single_dataset(
             repo_id=effective_repo_id,
             root=dataset_root,
+            info_path=resolved_info_path,
             cfg=cfg,
             image_transforms=image_transforms,
         )
@@ -193,6 +213,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             dataset = _build_single_dataset(
                 repo_id=cfg.dataset.repo_id,
                 root=dataset_root / cfg.dataset.repo_id,
+                info_path=None,
                 cfg=cfg,
                 image_transforms=image_transforms,
             )
@@ -212,6 +233,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         dataset = _build_single_dataset(
             repo_id=cfg.dataset.repo_id,
             root=cfg.dataset.root,
+            info_path=resolved_info_path,
             cfg=cfg,
             image_transforms=image_transforms,
         )

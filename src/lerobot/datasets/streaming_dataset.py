@@ -235,6 +235,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         self,
         repo_id: str,
         root: str | Path | None = None,
+        info_path: str | Path | None = None,
         episodes: list[int] | None = None,
         image_transforms: Callable | None = None,
         delta_timestamps: dict[list[float]] | None = None,
@@ -271,6 +272,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         super().__init__()
         self.repo_id = repo_id
         self._requested_root = Path(root) if root else None
+        self._info_path = Path(info_path) if info_path is not None else None
         self.root = self._requested_root if self._requested_root is not None else HF_LEROBOT_HOME / repo_id
         self.streaming_from_local = root is not None
 
@@ -293,7 +295,11 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         # Load metadata
         self.meta = LeRobotDatasetMetadata(
-            self.repo_id, self._requested_root, self.revision, force_cache_sync=force_cache_sync
+            self.repo_id,
+            self._requested_root,
+            self.revision,
+            force_cache_sync=force_cache_sync,
+            info_path=self._info_path,
         )
         self.root = self.meta.root
         self.revision = self.meta.revision

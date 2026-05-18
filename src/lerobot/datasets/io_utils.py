@@ -147,18 +147,21 @@ def write_info(info: dict, local_dir: Path) -> None:
     write_json(info, local_dir / INFO_PATH)
 
 
-def load_info(local_dir: Path) -> dict:
+def load_info(local_dir: Path, info_path: str | Path | None = None) -> dict:
     """Load dataset info metadata from its standard file path.
 
     Also converts shape lists to tuples for consistency.
 
     Args:
         local_dir (Path): The root directory of the dataset.
+        info_path (str | Path | None): Optional explicit path to an alternate
+            dataset info file.
 
     Returns:
         dict: The dataset information dictionary.
     """
-    info = load_json(local_dir / INFO_PATH)
+    info_file = Path(info_path) if info_path is not None else local_dir / INFO_PATH
+    info = load_json(info_file)
     for ft in info["features"].values():
         ft["shape"] = tuple(ft["shape"])
     return info
