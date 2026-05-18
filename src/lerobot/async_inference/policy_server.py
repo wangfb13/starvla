@@ -56,6 +56,7 @@ from .helpers import (
     TimedAction,
     TimedObservation,
     get_logger,
+    maybe_convert_pi05_canonical_action_chunk_to_robot_actions,
     observations_similar,
     raw_observation_to_observation,
 )
@@ -85,6 +86,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.lerobot_features = None
         self.actions_per_chunk = None
         self.policy = None
+        self.robot_type = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
 
@@ -145,6 +147,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_type = policy_specs.policy_type  # act, pi0, etc.
         self.lerobot_features = policy_specs.lerobot_features
         self.actions_per_chunk = policy_specs.actions_per_chunk
+        self.robot_type = getattr(policy_specs, "robot_type", None)
 
         policy_class = get_policy_class(self.policy_type)
 
@@ -375,15 +378,31 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             processed_action = self.postprocessor(single_action)
             processed_actions.append(processed_action)
 
-        # Stack back to (B, chunk_size, action_dim), then remove batch dim
-        action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
-        self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
+        """5. Convert to executable action chunk"""
+        if processed_actions and isinstance(processed_actions[0], torch.Tensor):
+            action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
+            self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
+            action_tensor = action_tensor.detach().cpu()
 
-        action_tensor = action_tensor.detach().cpu()
+            converted_chunk = maybe_convert_pi05_canonical_action_chunk_to_robot_actions(
+                action_chunk=action_tensor,
+                raw_observation=observation_t.get_observation(),
+                policy_type=self.policy_type,
+                policy_config=self.policy.config,
+                robot_type=self.robot_type,
+                canonical_state=observation_t.get_canonical_state(),
+                action_mask=observation.get(getattr(self.policy.config, "action_mask_observation_key", "")),
+            )
+            if converted_chunk is not None:
+                action_payload = converted_chunk
+            else:
+                action_payload = list(action_tensor)
+        else:
+            action_payload = processed_actions
 
-        """5. Convert to TimedAction list"""
+        """6. Convert to TimedAction list"""
         action_chunk = self._time_action_chunk(
-            observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
+            observation_t.get_timestamp(), action_payload, observation_t.get_timestep()
         )
         postprocess_stops = time.perf_counter()
         postprocessing_time = postprocess_stops - start_postprocess

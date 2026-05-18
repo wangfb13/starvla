@@ -30,6 +30,11 @@ from deepdiff import DeepDiff
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import DEFAULT_FEATURES
+from lerobot.policies.pi05.canonical_bimanual import (
+    CANONICAL_ACTION_DIM,
+    canonical_bimanual_action_to_pose_gripper_dict,
+    extract_arm_validity_from_canonical_state,
+)
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.processor import PolicyProcessorPipeline
@@ -65,6 +70,60 @@ def is_headless():
         return True
 
 
+def _get_cached_preprocessor_state(
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+) -> torch.Tensor | None:
+    from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
+
+    for step in preprocessor.steps:
+        if isinstance(step, RelativeActionsProcessorStep):
+            return step._last_state
+    return None
+
+
+def _build_spark3_default_action_from_observation(observation: dict[str, Any]) -> dict[str, float]:
+    from lerobot.robots.spark3_pose_gripper.schema import action_dict_from_observation
+
+    return action_dict_from_observation(observation)
+
+
+def _maybe_convert_pi05_canonical_action_to_robot_action(
+    *,
+    action: PolicyAction,
+    observation: dict[str, Any],
+    policy: PreTrainedPolicy,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    robot_type: str | None,
+):
+    if robot_type != "spark3_pose_gripper":
+        return action
+
+    if not getattr(policy.config, "canonicalize_bimanual_rot6d", False):
+        return action
+
+    if not isinstance(action, torch.Tensor):
+        return action
+    if action.shape[-1] != CANONICAL_ACTION_DIM:
+        return action
+
+    state = _get_cached_preprocessor_state(preprocessor)
+    arm_valid = None
+    if state is not None:
+        try:
+            arm_valid = extract_arm_validity_from_canonical_state(state)
+        except ValueError:
+            arm_valid = None
+
+    robot_action = _build_spark3_default_action_from_observation(observation)
+    robot_action.update(
+        canonical_bimanual_action_to_pose_gripper_dict(
+            action,
+            arm_valid=arm_valid,
+        )
+    )
+    return robot_action
+
+
 def predict_action(
     observation: dict[str, np.ndarray],
     policy: PreTrainedPolicy,
@@ -96,9 +155,11 @@ def predict_action(
         robot_type: An optional string identifier for the robot type.
 
     Returns:
-        A `torch.Tensor` containing the predicted action, ready for the robot.
+        A postprocessed policy action. For canonical PI0.5 on `spark3_pose_gripper`,
+        this is converted into a robot action dictionary directly.
     """
     observation = copy(observation)
+    raw_observation = copy(observation)
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
@@ -112,6 +173,14 @@ def predict_action(
         action = policy.select_action(observation)
 
         action = postprocessor(action)
+
+    action = _maybe_convert_pi05_canonical_action_to_robot_action(
+        action=action,
+        observation=raw_observation,
+        policy=policy,
+        preprocessor=preprocessor,
+        robot_type=robot_type,
+    )
 
     return action
 

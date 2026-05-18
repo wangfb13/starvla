@@ -46,7 +46,13 @@ def cfg_to_group(
         f"seed:{cfg.seed}",
     ]
     if cfg.dataset is not None:
-        lst.append(f"dataset:{cfg.dataset.repo_id}")
+        if cfg.dataset.repo_id is None:
+            dataset_name = Path(cfg.dataset.root).name if cfg.dataset.root else "unknown"
+        elif isinstance(cfg.dataset.repo_id, list):
+            dataset_name = "+".join(cfg.dataset.repo_id)
+        else:
+            dataset_name = cfg.dataset.repo_id
+        lst.append(f"dataset:{dataset_name}")
     if cfg.env is not None:
         lst.append(f"env:{cfg.env.type}")
     if truncate_tags:

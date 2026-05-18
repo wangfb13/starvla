@@ -34,11 +34,18 @@ from lerobot.policies import (  # noqa: F401
     SmolVLAConfig,
     VQBeTConfig,
 )
+from lerobot.policies.pi05.canonical_bimanual import (
+    CANONICAL_ACTION_DIM,
+    canonical_bimanual_action_chunk_to_pose_gripper_dicts,
+    extract_arm_validity_from_action_mask,
+    extract_arm_validity_from_canonical_state,
+)
+from lerobot.robots.spark3_pose_gripper.schema import action_dict_from_observation
 from lerobot.robots.robot import Robot
-from lerobot.utils.constants import OBS_IMAGES, OBS_STATE, OBS_STR
+from lerobot.utils.constants import OBS_ACTION_MASK, OBS_IMAGES, OBS_STATE, OBS_STR
 from lerobot.utils.utils import init_logging
 
-Action = torch.Tensor
+Action = torch.Tensor | dict[str, float]
 
 # observation as received from the robot (can be numpy arrays, floats, etc.)
 RawObservation = dict[str, Any]
@@ -172,6 +179,46 @@ def prepare_raw_observation(
     return {**state_dict, **image_dict}
 
 
+def build_spark3_default_action_from_raw_observation(raw_observation: RawObservation) -> dict[str, float]:
+    return action_dict_from_observation(raw_observation)
+
+
+def maybe_convert_pi05_canonical_action_chunk_to_robot_actions(
+    *,
+    action_chunk: torch.Tensor,
+    raw_observation: RawObservation,
+    policy_type: str,
+    policy_config: Any,
+    robot_type: str | None,
+    canonical_state: torch.Tensor | None = None,
+    action_mask: torch.Tensor | None = None,
+) -> list[dict[str, float]] | None:
+    if policy_type != "pi05":
+        return None
+    if robot_type != "spark3_pose_gripper":
+        return None
+    if not getattr(policy_config, "canonicalize_bimanual_rot6d", False):
+        return None
+    if action_chunk.shape[-1] != CANONICAL_ACTION_DIM:
+        return None
+
+    arm_valid = None
+    if canonical_state is not None:
+        try:
+            arm_valid = extract_arm_validity_from_canonical_state(canonical_state)
+        except ValueError:
+            arm_valid = None
+    if arm_valid is None and action_mask is not None:
+        try:
+            arm_valid = extract_arm_validity_from_action_mask(action_mask)
+        except ValueError:
+            arm_valid = None
+
+    default_action = build_spark3_default_action_from_raw_observation(raw_observation)
+    converted_chunk = canonical_bimanual_action_chunk_to_pose_gripper_dicts(action_chunk, arm_valid=arm_valid)
+    return [{**default_action, **action_dict} for action_dict in converted_chunk]
+
+
 def get_logger(name: str, log_to_file: bool = True) -> logging.Logger:
     """
     Get a logger using the standardized logging setup from utils.py.
@@ -233,6 +280,18 @@ class TimedObservation(TimedData):
     def get_observation(self):
         return self.observation
 
+    def get_canonical_state(self) -> torch.Tensor | None:
+        canonical_state = self.observation.get(OBS_STATE)
+        if not isinstance(canonical_state, torch.Tensor):
+            return None
+        return canonical_state
+
+    def get_action_mask(self) -> torch.Tensor | None:
+        action_mask = self.observation.get(OBS_ACTION_MASK)
+        if not isinstance(action_mask, torch.Tensor):
+            return None
+        return action_mask
+
 
 @dataclass
 class FPSTracker:
@@ -269,6 +328,7 @@ class RemotePolicyConfig:
     lerobot_features: dict[str, PolicyFeature]
     actions_per_chunk: int
     device: str = "cpu"
+    robot_type: str | None = None
     rename_map: dict[str, str] = field(default_factory=dict)
 
 

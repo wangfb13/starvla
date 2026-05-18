@@ -310,6 +310,18 @@ def default_action_dict(
     return action
 
 
+def action_dict_from_observation(
+    observation: dict[str, Any],
+    end_effectors: dict[str, Spark3EndEffectorConfig] | None = None,
+) -> dict[str, float]:
+    configured_end_effectors = end_effectors if end_effectors is not None else default_end_effectors()
+    action = default_action_dict(configured_end_effectors)
+    for key in list(action):
+        if key in observation:
+            action[key] = float(observation[key])
+    return action
+
+
 def action_feature_dict(end_effectors: dict[str, Spark3EndEffectorConfig]) -> dict[str, type]:
     features: dict[str, type] = {}
     features.update(pose_feature_dict("left_arm_pose"))

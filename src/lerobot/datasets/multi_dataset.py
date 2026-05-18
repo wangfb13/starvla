@@ -14,10 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+from bisect import bisect_right
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 
 import datasets
+import pandas as pd
 import torch
 import torch.utils
 
@@ -28,6 +31,131 @@ from lerobot.datasets.video_utils import VideoFrame
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_stats(
+    stats: dict[str, dict],
+    enabled_feature_keys: list[str],
+) -> dict[str, dict]:
+    return {key: value for key, value in stats.items() if key in enabled_feature_keys}
+
+
+def _aggregate_tasks(datasets_list: list[LeRobotDataset]) -> pd.DataFrame | None:
+    task_frames = [dataset.meta.tasks for dataset in datasets_list if dataset.meta.tasks is not None]
+    if not task_frames:
+        return None
+
+    combined = pd.concat(task_frames)
+    combined = combined[~combined.index.duplicated(keep="first")].copy()
+    combined["task_index"] = range(len(combined))
+    combined.index.name = "task"
+    return combined
+
+
+def _aggregate_episodes(datasets_list: list[LeRobotDataset]) -> datasets.Dataset | None:
+    aggregated: list[datasets.Dataset] = []
+    frame_offset = 0
+    episode_offset = 0
+
+    for dataset in datasets_list:
+        episode_ds = dataset.meta.episodes.with_format(None)
+        episode_dict = {column: list(episode_ds[column]) for column in episode_ds.column_names}
+
+        if "episode_index" in episode_dict:
+            episode_dict["episode_index"] = [value + episode_offset for value in episode_dict["episode_index"]]
+        if "dataset_from_index" in episode_dict:
+            episode_dict["dataset_from_index"] = [
+                value + frame_offset for value in episode_dict["dataset_from_index"]
+            ]
+        if "dataset_to_index" in episode_dict:
+            episode_dict["dataset_to_index"] = [
+                value + frame_offset for value in episode_dict["dataset_to_index"]
+            ]
+
+        aggregated.append(datasets.Dataset.from_dict(episode_dict, features=episode_ds.features))
+        frame_offset += dataset.num_frames
+        episode_offset += dataset.num_episodes
+
+    if not aggregated:
+        return None
+    if len(aggregated) == 1:
+        return aggregated[0]
+    return datasets.concatenate_datasets(aggregated)
+
+
+class MultiLeRobotDatasetMetadata:
+    """Training-oriented metadata adapter for concatenated local datasets."""
+
+    def __init__(
+        self,
+        datasets_list: list[LeRobotDataset],
+        repo_ids: list[str],
+        enabled_feature_keys: list[str],
+        stats: dict[str, dict],
+    ):
+        if len(datasets_list) == 0:
+            raise ValueError("At least one dataset is required to build multi-dataset metadata.")
+
+        first_meta = datasets_list[0].meta
+        self.repo_id = "+".join(repo_ids)
+        self.revision = datasets_list[0].revision
+        self.root = datasets_list[0].root.parent if len(datasets_list) > 1 else datasets_list[0].root
+        self.info = deepcopy(first_meta.info)
+        self.info["features"] = {
+            key: deepcopy(first_meta.features[key]) for key in enabled_feature_keys if key in first_meta.features
+        }
+        self.info["total_frames"] = sum(dataset.num_frames for dataset in datasets_list)
+        self.info["total_episodes"] = sum(dataset.num_episodes for dataset in datasets_list)
+        self.info["splits"] = {"train": f"0:{self.info['total_episodes']}"}
+
+        self.tasks = _aggregate_tasks(datasets_list)
+        self.subtasks = None
+        self.episodes = _aggregate_episodes(datasets_list)
+        self.stats = stats
+
+    @property
+    def robot_type(self) -> str | None:
+        return self.info["robot_type"]
+
+    @property
+    def fps(self) -> int:
+        return self.info["fps"]
+
+    @property
+    def features(self) -> dict[str, dict]:
+        return self.info["features"]
+
+    @property
+    def image_keys(self) -> list[str]:
+        return [key for key, ft in self.features.items() if ft["dtype"] == "image"]
+
+    @property
+    def video_keys(self) -> list[str]:
+        return [key for key, ft in self.features.items() if ft["dtype"] in ["video", "tactile", "depth"]]
+
+    @property
+    def camera_keys(self) -> list[str]:
+        return [
+            key
+            for key, ft in self.features.items()
+            if ft["dtype"] in ["video", "image", "tactile", "depth"]
+        ]
+
+    @property
+    def names(self) -> dict[str, list | dict]:
+        return {key: ft["names"] for key, ft in self.features.items()}
+
+    @property
+    def shapes(self) -> dict[str, tuple]:
+        return {key: tuple(ft["shape"]) for key, ft in self.features.items()}
+
+    @property
+    def total_episodes(self) -> int:
+        return self.info["total_episodes"]
+
+    @property
+    def total_frames(self) -> int:
+        return self.info["total_frames"]
 
 
 class MultiLeRobotDataset(torch.utils.data.Dataset):
@@ -50,6 +178,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
     ):
         super().__init__()
         self.repo_ids = repo_ids
+        self.repo_id = "+".join(repo_ids)
         self.root = Path(root) if root else HF_LEROBOT_HOME
         self.tolerances_s = tolerances_s if tolerances_s else dict.fromkeys(repo_ids, 0.0001)
         # Construct the underlying datasets passing everything but `transform` and `delta_timestamps` which
@@ -68,6 +197,18 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             for repo_id in repo_ids
         ]
 
+        if len(self._datasets) == 0:
+            raise ValueError("At least one dataset is required.")
+
+        first_fps = self._datasets[0].meta.fps
+        fps_mismatch = {
+            dataset.repo_id: dataset.meta.fps for dataset in self._datasets if dataset.meta.fps != first_fps
+        }
+        if fps_mismatch:
+            raise ValueError(
+                f"All datasets must have the same fps to be concatenated. Expected {first_fps}, got {fps_mismatch}."
+            )
+
         # Disable any data keys that are not common across all of the datasets. Note: we may relax this
         # restriction in future iterations of this class. For now, this is necessary at least for being able
         # to use PyTorch's default DataLoader collate function.
@@ -80,8 +221,24 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 "Multiple datasets were provided but they had no keys common to all of them. "
                 "The multi-dataset functionality currently only keeps common keys."
             )
+
+        self.enabled_feature_keys: list[str] = []
+        first_feature_specs = self._datasets[0].features
+        for key in first_feature_specs:
+            if key not in intersection_features:
+                continue
+
+            if all(dataset.features[key] == first_feature_specs[key] for dataset in self._datasets[1:]):
+                self.enabled_feature_keys.append(key)
+            else:
+                self.disabled_features.add(key)
+                logger.warning(
+                    "key %s was disabled because its feature spec differs across datasets.",
+                    key,
+                )
+
         for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
-            extra_keys = set(ds.features).difference(intersection_features)
+            extra_keys = set(ds.features).difference(self.enabled_feature_keys)
             if extra_keys:
                 logger.warning(
                     f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
@@ -89,11 +246,31 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 )
                 self.disabled_features.update(extra_keys)
 
+        if len(self.enabled_feature_keys) == 0:
+            raise RuntimeError(
+                "Multiple datasets were provided but none of their common keys had matching feature specs."
+            )
+
         self.delta_timestamps = delta_timestamps
+        self.episodes = None
         # TODO(rcadene, aliberts): We should not perform this aggregation for datasets
         # with multiple robots of different ranges. Instead we should have one normalization
         # per robot.
-        self.stats = aggregate_stats([dataset.meta.stats for dataset in self._datasets])
+        self.stats = _filter_stats(
+            aggregate_stats([dataset.meta.stats for dataset in self._datasets]),
+            self.enabled_feature_keys,
+        )
+        self.meta = MultiLeRobotDatasetMetadata(
+            self._datasets,
+            repo_ids=self.repo_ids,
+            enabled_feature_keys=self.enabled_feature_keys,
+            stats=self.stats,
+        )
+        self._cumulative_sizes: list[int] = []
+        running_size = 0
+        for dataset in self._datasets:
+            running_size += dataset.num_frames
+            self._cumulative_sizes.append(running_size)
         self.set_image_transforms(image_transforms)
 
     def set_image_transforms(self, image_transforms: Callable | None) -> None:
@@ -122,7 +299,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
         NOTE: Fow now, this relies on a check in __init__ to make sure all sub-datasets have the same info.
         """
-        return self._datasets[0].meta.info["fps"]
+        return self.meta.fps
 
     @property
     def video(self) -> bool:
@@ -136,16 +313,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
     @property
     def features(self) -> datasets.Features:
-        features = {}
-        for dataset in self._datasets:
-            features.update(
-                {
-                    k: v
-                    for k, v in get_hf_features_from_features(dataset.features).items()
-                    if k not in self.disabled_features
-                }
-            )
-        return features
+        return get_hf_features_from_features(self.meta.features)
 
     @property
     def camera_keys(self) -> list[str]:
@@ -195,17 +363,8 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         if idx >= len(self):
             raise IndexError(f"Index {idx} out of bounds.")
-        # Determine which dataset to get an item from based on the index.
-        start_idx = 0
-        dataset_idx = 0
-        for dataset in self._datasets:
-            if idx >= start_idx + dataset.num_frames:
-                start_idx += dataset.num_frames
-                dataset_idx += 1
-                continue
-            break
-        else:
-            raise AssertionError("We expect the loop to break out as long as the index is within bounds.")
+        dataset_idx = bisect_right(self._cumulative_sizes, idx)
+        start_idx = 0 if dataset_idx == 0 else self._cumulative_sizes[dataset_idx - 1]
         item = self._datasets[dataset_idx][idx - start_idx]
         item["dataset_index"] = torch.tensor(dataset_idx)
         for data_key in self.disabled_features:
@@ -213,6 +372,10 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 del item[data_key]
 
         return item
+
+    def iter_hf_datasets(self):
+        for dataset in self._datasets:
+            yield dataset.hf_dataset
 
     def __repr__(self):
         return (

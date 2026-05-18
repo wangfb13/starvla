@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -145,6 +146,174 @@ def quat_xyzw_to_rot6d(quat: Tensor) -> Tensor:
     return torch.cat([col0, col1], dim=-1)
 
 
+def _mat2quat_xyzw_np(rmat: np.ndarray) -> np.ndarray:
+    mat = np.asarray(rmat, dtype=np.float32)[:3, :3]
+
+    m00 = mat[0, 0]
+    m01 = mat[0, 1]
+    m02 = mat[0, 2]
+    m10 = mat[1, 0]
+    m11 = mat[1, 1]
+    m12 = mat[1, 2]
+    m20 = mat[2, 0]
+    m21 = mat[2, 1]
+    m22 = mat[2, 2]
+
+    k = np.array(
+        [
+            [m00 - m11 - m22, 0.0, 0.0, 0.0],
+            [m01 + m10, m11 - m00 - m22, 0.0, 0.0],
+            [m02 + m20, m12 + m21, m22 - m00 - m11, 0.0],
+            [m21 - m12, m02 - m20, m10 - m01, m00 + m11 + m22],
+        ],
+        dtype=np.float32,
+    )
+    k /= 3.0
+
+    eigenvalues, eigenvectors = np.linalg.eigh(k)
+    wxyz = eigenvectors[np.array([3, 0, 1, 2]), np.argmax(eigenvalues)]
+    if wxyz[0] < 0.0:
+        wxyz = -wxyz
+    return wxyz[np.array([1, 2, 3, 0])].astype(np.float32)
+
+
+def rot6d_to_rotation_matrix(rot6d: Tensor) -> Tensor:
+    rot6d = rot6d.to(torch.float32)
+    a1 = rot6d[..., 0:3]
+    a2 = rot6d[..., 3:6]
+
+    b1 = torch.nn.functional.normalize(a1, dim=-1, eps=1e-6)
+    a2_orth = a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1
+    b2 = torch.nn.functional.normalize(a2_orth, dim=-1, eps=1e-6)
+    b3 = torch.cross(b1, b2, dim=-1)
+
+    return torch.stack([b1, b2, b3], dim=-1)
+
+
+def rotation_matrix_to_quat_xyzw(rotation_matrix: Tensor) -> Tensor:
+    original_shape = rotation_matrix.shape[:-2]
+    matrix_np = rotation_matrix.detach().to(torch.float32).cpu().numpy().reshape(-1, 3, 3)
+    quats_np = np.stack([_mat2quat_xyzw_np(mat) for mat in matrix_np], axis=0)
+    quats = torch.from_numpy(quats_np).to(device=rotation_matrix.device, dtype=rotation_matrix.dtype)
+    return quats.reshape(*original_shape, 4)
+
+
+def rot6d_to_quat_xyzw(rot6d: Tensor) -> Tensor:
+    return rotation_matrix_to_quat_xyzw(rot6d_to_rotation_matrix(rot6d))
+
+
+def extract_arm_validity_from_canonical_state(state: Tensor, threshold: float = 0.5) -> dict[str, bool]:
+    if state.ndim == 2:
+        if state.shape[0] != 1:
+            raise ValueError(f"Expected batch size 1 for canonical state validity extraction, got {state.shape[0]}")
+        state = state[0]
+
+    if state.ndim != 1:
+        raise ValueError(f"Expected canonical state to be rank-1 or rank-2, got shape {tuple(state.shape)}")
+    if state.shape[-1] < CANONICAL_STATE_DIM:
+        raise ValueError(
+            f"Expected canonical state dim >= {CANONICAL_STATE_DIM}, got {state.shape[-1]}"
+        )
+
+    return {
+        "left": bool(float(state[-2]) > threshold),
+        "right": bool(float(state[-1]) > threshold),
+    }
+
+
+def extract_arm_validity_from_action_mask(action_mask: Tensor, threshold: float = 0.5) -> dict[str, bool]:
+    if action_mask.ndim == 2:
+        if action_mask.shape[0] != 1:
+            raise ValueError(f"Expected batch size 1 for action mask validity extraction, got {action_mask.shape[0]}")
+        action_mask = action_mask[0]
+
+    if action_mask.ndim != 1:
+        raise ValueError(f"Expected action mask to be rank-1 or rank-2, got shape {tuple(action_mask.shape)}")
+    if action_mask.shape[-1] < CANONICAL_ACTION_DIM:
+        raise ValueError(
+            f"Expected canonical action mask dim >= {CANONICAL_ACTION_DIM}, got {action_mask.shape[-1]}"
+        )
+
+    return {
+        "left": bool(float(action_mask[:ARM_CANONICAL_DIM].max()) > threshold),
+        "right": bool(float(action_mask[ARM_CANONICAL_DIM:CANONICAL_ACTION_DIM].max()) > threshold),
+    }
+
+
+def canonical_bimanual_action_to_pose_gripper_dict(
+    action: Tensor,
+    *,
+    arm_valid: dict[str, bool] | list[bool] | tuple[bool, bool] | None = None,
+) -> dict[str, float]:
+    if action.ndim == 2:
+        if action.shape[0] != 1:
+            raise ValueError(f"Expected batch size 1 for canonical action conversion, got {action.shape[0]}")
+        action = action[0]
+
+    if action.ndim != 1:
+        raise ValueError(f"Expected canonical action to be rank-1 or rank-2, got shape {tuple(action.shape)}")
+    if action.shape[-1] != CANONICAL_ACTION_DIM:
+        raise ValueError(f"Expected canonical action dim {CANONICAL_ACTION_DIM}, got {action.shape[-1]}")
+
+    if arm_valid is None:
+        valid_by_arm = {arm: True for arm in ARM_NAMES}
+    elif isinstance(arm_valid, dict):
+        valid_by_arm = {arm: bool(arm_valid.get(arm, True)) for arm in ARM_NAMES}
+    else:
+        if len(arm_valid) != len(ARM_NAMES):
+            raise ValueError(f"Expected {len(ARM_NAMES)} arm-valid flags, got {len(arm_valid)}")
+        valid_by_arm = {arm: bool(flag) for arm, flag in zip(ARM_NAMES, arm_valid, strict=True)}
+
+    robot_action: dict[str, float] = {}
+    for arm_idx, arm in enumerate(ARM_NAMES):
+        if not valid_by_arm[arm]:
+            continue
+
+        start = arm_idx * ARM_CANONICAL_DIM
+        arm_action = action[start : start + ARM_CANONICAL_DIM]
+        quat = rot6d_to_quat_xyzw(arm_action[3:9].unsqueeze(0))[0]
+
+        robot_action.update(
+            {
+                f"{arm}_arm_pose.x": float(arm_action[0]),
+                f"{arm}_arm_pose.y": float(arm_action[1]),
+                f"{arm}_arm_pose.z": float(arm_action[2]),
+                f"{arm}_arm_pose.qx": float(quat[0]),
+                f"{arm}_arm_pose.qy": float(quat[1]),
+                f"{arm}_arm_pose.qz": float(quat[2]),
+                f"{arm}_arm_pose.qw": float(quat[3]),
+                f"{arm}_gripper.pos": float(arm_action[9]),
+            }
+        )
+
+    return robot_action
+
+
+def canonical_bimanual_action_chunk_to_pose_gripper_dicts(
+    action_chunk: Tensor,
+    *,
+    arm_valid: dict[str, bool] | list[bool] | tuple[bool, bool] | None = None,
+) -> list[dict[str, float]]:
+    if action_chunk.ndim == 3:
+        if action_chunk.shape[0] != 1:
+            raise ValueError(
+                f"Expected batch size 1 for canonical action chunk conversion, got {action_chunk.shape[0]}"
+            )
+        action_chunk = action_chunk[0]
+
+    if action_chunk.ndim != 2:
+        raise ValueError(
+            f"Expected canonical action chunk to be rank-2 or rank-3, got shape {tuple(action_chunk.shape)}"
+        )
+    if action_chunk.shape[-1] != CANONICAL_ACTION_DIM:
+        raise ValueError(f"Expected canonical action dim {CANONICAL_ACTION_DIM}, got {action_chunk.shape[-1]}")
+
+    return [
+        canonical_bimanual_action_to_pose_gripper_dict(action, arm_valid=arm_valid)
+        for action in action_chunk
+    ]
+
+
 def _canonicalize_arm(tensor: Tensor, spec: ArmSourceSpec, missing_value: float | None) -> tuple[Tensor, Tensor, Tensor]:
     leading_shape = tensor.shape[:-1]
     zeros = torch.zeros((*leading_shape, 1), device=tensor.device, dtype=tensor.dtype)
@@ -266,20 +435,47 @@ def _compute_masked_stats(values: Tensor, mask: Tensor, names: list[str]) -> dic
     return output
 
 
+def _build_relative_mask(action_names: list[str], exclude_joints: Sequence[str] | None) -> Tensor:
+    if not exclude_joints:
+        return torch.ones(len(action_names), dtype=torch.float32)
+
+    exclude_tokens = [str(name).lower() for name in exclude_joints if name]
+    if not exclude_tokens:
+        return torch.ones(len(action_names), dtype=torch.float32)
+
+    mask = []
+    for name in action_names:
+        action_name = str(name).lower()
+        is_excluded = any(token == action_name or token in action_name for token in exclude_tokens)
+        mask.append(0.0 if is_excluded else 1.0)
+    return torch.tensor(mask, dtype=torch.float32)
+
+
 def build_canonical_bimanual_stats(
     dataset: Any,
     *,
     source_state_names: list[str] | None,
     source_action_names: list[str] | None,
     missing_value: float | None,
+    use_relative_actions: bool = False,
+    relative_exclude_joints: Sequence[str] | None = None,
     base_stats: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if dataset is None:
         raise ValueError("dataset is required to build canonical rot6d statistics")
 
-    hf_dataset = dataset.hf_dataset
-    raw_states = np.asarray(hf_dataset[OBS_STATE], dtype=np.float32)
-    raw_actions = np.asarray(hf_dataset[ACTION], dtype=np.float32)
+    if hasattr(dataset, "iter_hf_datasets"):
+        state_batches = []
+        action_batches = []
+        for hf_dataset in dataset.iter_hf_datasets():
+            state_batches.append(np.asarray(hf_dataset[OBS_STATE], dtype=np.float32))
+            action_batches.append(np.asarray(hf_dataset[ACTION], dtype=np.float32))
+        raw_states = np.concatenate(state_batches, axis=0)
+        raw_actions = np.concatenate(action_batches, axis=0)
+    else:
+        hf_dataset = dataset.hf_dataset
+        raw_states = np.asarray(hf_dataset[OBS_STATE], dtype=np.float32)
+        raw_actions = np.asarray(hf_dataset[ACTION], dtype=np.float32)
 
     canonical = canonicalize_bimanual_state_action(
         state=torch.from_numpy(raw_states),
@@ -298,6 +494,16 @@ def build_canonical_bimanual_stats(
         dim=-1,
     )
 
+    canonical_actions = canonical[ACTION]
+    action_mask = canonical["action_mask"]
+    if use_relative_actions:
+        relative_mask = _build_relative_mask(
+            canonical_action_feature_names(),
+            relative_exclude_joints,
+        ).to(device=canonical_actions.device, dtype=canonical_actions.dtype)
+        canonical_actions = canonical_actions.clone()
+        canonical_actions -= canonical[OBS_STATE][..., :CANONICAL_ACTION_DIM] * relative_mask
+
     stats[OBS_STATE] = _compute_masked_stats(canonical[OBS_STATE], state_mask, canonical_state_feature_names())
-    stats[ACTION] = _compute_masked_stats(canonical[ACTION], canonical["action_mask"], canonical_action_feature_names())
+    stats[ACTION] = _compute_masked_stats(canonical_actions, action_mask, canonical_action_feature_names())
     return stats

@@ -273,6 +273,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             source_state_names=getattr(cfg.policy, "source_state_feature_names", None),
             source_action_names=getattr(cfg.policy, "source_action_feature_names", None),
             missing_value=getattr(cfg.policy, "canonical_missing_value", None),
+            use_relative_actions=getattr(cfg.policy, "use_relative_actions", False),
+            relative_exclude_joints=getattr(cfg.policy, "relative_exclude_joints", None),
             base_stats=dataset.meta.stats,
         )
 

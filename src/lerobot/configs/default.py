@@ -22,13 +22,17 @@ from lerobot.datasets.video_utils import get_safe_default_codec
 
 @dataclass
 class DatasetConfig:
-    # You may provide a list of datasets here. `train.py` creates them all and concatenates them. Note: only data
-    # keys common between the datasets are kept. Each dataset gets and additional transform that inserts the
-    # "dataset_index" into the returned item. The index mapping is made according to the order in which the
-    # datasets are provided.
-    repo_id: str
-    # Root directory for a concrete local dataset tree (e.g. 'dataset/path'). If None, local datasets are
-    # looked up under $HF_LEROBOT_HOME/repo_id and Hub downloads use a revision-safe cache under $HF_LEROBOT_HOME/hub.
+    # You may provide:
+    # - a single dataset repo_id
+    # - a list of dataset repo_ids
+    # - no repo_id, in which case `dataset.root` may point either to a concrete local dataset tree or to a
+    #   parent directory containing multiple independent local LeRobot datasets.
+    repo_id: str | list[str] | None = None
+    # Root directory for:
+    # - a concrete local dataset tree (e.g. 'dataset/path')
+    # - or a parent directory that contains multiple child LeRobot datasets.
+    # If None, local datasets are looked up under $HF_LEROBOT_HOME/repo_id and Hub downloads use a
+    # revision-safe cache under $HF_LEROBOT_HOME/hub.
     root: str | None = None
     episodes: list[int] | None = None
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)

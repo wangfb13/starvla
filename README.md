@@ -129,6 +129,7 @@ Learn how to implement your own simulation environment or benchmark and distribu
 ## Resources
 
 - **[Documentation](https://huggingface.co/docs/lerobot/index):** The complete guide to tutorials & API.
+- **[Project Update And Usage Notes (ZH)](./PROJECT_UPDATE_AND_USAGE_ZH.md):** Local modifications, training notes, and PI0.5/PI05 usage details for this workspace.
 - **[Chinese Tutorials: LeRobot+SO-ARM101中文教程-同济子豪兄](https://zihao-ai.feishu.cn/wiki/space/7589642043471924447)** Detailed doc for assembling, teleoperate, dataset, train, deploy. Verified by Seed Studio and 5 global hackathon players.
 - **[Discord](https://discord.gg/q8Dzzpym3f):** Join the `LeRobot` server to discuss with the community.
 - **[X](https://x.com/LeRobotHF):** Follow us on X to stay up-to-date with the latest developments.

@@ -190,6 +190,12 @@ def make_robot_action(action_tensor: PolicyAction, ds_features: dict[str, dict])
         corresponding floating-point values, ready to be sent to a robot
         controller.
     """
+    if isinstance(action_tensor, dict):
+        return {
+            key: float(value.item()) if hasattr(value, "item") else float(value)
+            for key, value in action_tensor.items()
+        }
+
     # TODO(Steven): Check if these steps are already in all postprocessor policies
     action_tensor = action_tensor.squeeze(0)
     action_tensor = action_tensor.to("cpu")

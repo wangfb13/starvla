@@ -111,6 +111,7 @@ class RobotClient:
             lerobot_features,
             config.actions_per_chunk,
             config.policy_device,
+            self.robot.robot_type,
         )
         self.channel = grpc.insecure_channel(
             self.server_address, grpc_channel_options(initial_backoff=f"{config.environment_dt:.4f}s")
@@ -258,13 +259,18 @@ class RobotClient:
 
             # If the new action's timestep is in the current action queue, aggregate it
             # TODO: There is probably a way to do this with broadcasting of the two action tensors
+            current_action = current_action_queue[new_action.get_timestep()]
+            new_action_value = new_action.get_action()
+            if isinstance(current_action, dict) or isinstance(new_action_value, dict):
+                aggregated_action = new_action_value
+            else:
+                aggregated_action = aggregate_fn(current_action, new_action_value)
+
             future_action_queue.put(
                 TimedAction(
                     timestamp=new_action.get_timestamp(),
                     timestep=new_action.get_timestep(),
-                    action=aggregate_fn(
-                        current_action_queue[new_action.get_timestep()], new_action.get_action()
-                    ),
+                    action=aggregated_action,
                 )
             )
 
@@ -292,7 +298,7 @@ class RobotClient:
                 deserialize_time = time.perf_counter() - deserialize_start
 
                 # Log device type of received actions
-                if len(timed_actions) > 0:
+                if len(timed_actions) > 0 and isinstance(timed_actions[0].get_action(), torch.Tensor):
                     received_device = timed_actions[0].get_action().device.type
                     self.logger.debug(f"Received actions on device: {received_device}")
 
@@ -300,6 +306,8 @@ class RobotClient:
                 client_device = self.config.client_device
                 if client_device != "cpu":
                     for timed_action in timed_actions:
+                        if not isinstance(timed_action.get_action(), torch.Tensor):
+                            continue
                         if timed_action.get_action().device.type != client_device:
                             timed_action.action = timed_action.get_action().to(client_device)
                     self.logger.debug(f"Converted actions to device: {client_device}")
@@ -368,9 +376,17 @@ class RobotClient:
         with self.action_queue_lock:
             return not self.action_queue.empty()
 
-    def _action_tensor_to_action_dict(self, action_tensor: torch.Tensor) -> dict[str, float]:
-        action = {key: action_tensor[i].item() for i, key in enumerate(self.robot.action_features)}
-        return action
+    def _action_to_action_dict(self, action: Action) -> dict[str, float]:
+        if isinstance(action, dict):
+            return {
+                key: float(value.item()) if hasattr(value, "item") else float(value)
+                for key, value in action.items()
+            }
+
+        if action.device.type != "cpu":
+            action = action.detach().cpu()
+
+        return {key: float(action[i].item()) for i, key in enumerate(self.robot.action_features)}
 
     def control_loop_action(self, verbose: bool = False) -> dict[str, Any]:
         """Reading and performing actions in local queue"""
@@ -384,7 +400,7 @@ class RobotClient:
         get_end = time.perf_counter() - get_start
 
         _performed_action = self.robot.send_action(
-            self._action_tensor_to_action_dict(timed_action.get_action())
+            self._action_to_action_dict(timed_action.get_action())
         )
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
