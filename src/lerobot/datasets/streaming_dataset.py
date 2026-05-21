@@ -520,7 +520,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         result["task"] = self.meta.tasks.iloc[item["task_index"]].name
 
-        yield result
+        yield self.meta.canonicalize_item(result, delta_timestamps=self.delta_timestamps)
 
     def _get_query_timestamps(
         self,
@@ -681,7 +681,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             return
 
         # Get all available feature keys from the dataset metadata
-        available_features = set(self.meta.features.keys())
+        available_features = set(self.meta.reader_features.keys())
 
         # Get all keys from delta_timestamps
         delta_keys = set(delta_timestamps.keys())

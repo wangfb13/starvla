@@ -451,6 +451,37 @@ def _build_relative_mask(action_names: list[str], exclude_joints: Sequence[str] 
     return torch.tensor(mask, dtype=torch.float32)
 
 
+def _collect_state_action_arrays(single_dataset: Any) -> tuple[np.ndarray, np.ndarray]:
+    reader = single_dataset._ensure_reader()
+    if reader.hf_dataset is None:
+        reader.load_and_activate()
+
+    hf_dataset = reader.hf_dataset
+    if hf_dataset is None:
+        raise ValueError("Reader failed to load the Hugging Face dataset for canonical stats computation.")
+
+    raw_states = np.asarray(hf_dataset[OBS_STATE], dtype=np.float32)
+
+    if reader.delta_indices is None or ACTION not in reader.delta_indices:
+        raw_actions = np.asarray(hf_dataset[ACTION], dtype=np.float32)
+        return raw_states, raw_actions
+
+    action_windows: list[np.ndarray] = []
+    for relative_idx in range(len(hf_dataset)):
+        item = hf_dataset[relative_idx]
+        episode_index = item["episode_index"]
+        absolute_index = item["index"]
+
+        ep_idx = int(episode_index.item()) if isinstance(episode_index, torch.Tensor) else int(episode_index)
+        abs_idx = int(absolute_index.item()) if isinstance(absolute_index, torch.Tensor) else int(absolute_index)
+
+        query_indices, _ = reader._get_query_indices(abs_idx, ep_idx)
+        query_result = reader._query_hf_dataset({ACTION: query_indices[ACTION]})
+        action_windows.append(query_result[ACTION].cpu().numpy())
+
+    return raw_states, np.asarray(action_windows, dtype=np.float32)
+
+
 def build_canonical_bimanual_stats(
     dataset: Any,
     *,
@@ -464,18 +495,16 @@ def build_canonical_bimanual_stats(
     if dataset is None:
         raise ValueError("dataset is required to build canonical rot6d statistics")
 
-    if hasattr(dataset, "iter_hf_datasets"):
-        state_batches = []
-        action_batches = []
-        for hf_dataset in dataset.iter_hf_datasets():
-            state_batches.append(np.asarray(hf_dataset[OBS_STATE], dtype=np.float32))
-            action_batches.append(np.asarray(hf_dataset[ACTION], dtype=np.float32))
-        raw_states = np.concatenate(state_batches, axis=0)
-        raw_actions = np.concatenate(action_batches, axis=0)
-    else:
-        hf_dataset = dataset.hf_dataset
-        raw_states = np.asarray(hf_dataset[OBS_STATE], dtype=np.float32)
-        raw_actions = np.asarray(hf_dataset[ACTION], dtype=np.float32)
+    datasets_list = getattr(dataset, "_datasets", [dataset])
+    state_batches = []
+    action_batches = []
+    for child_dataset in datasets_list:
+        states, actions = _collect_state_action_arrays(child_dataset)
+        state_batches.append(states)
+        action_batches.append(actions)
+
+    raw_states = np.concatenate(state_batches, axis=0)
+    raw_actions = np.concatenate(action_batches, axis=0)
 
     canonical = canonicalize_bimanual_state_action(
         state=torch.from_numpy(raw_states),
@@ -502,7 +531,10 @@ def build_canonical_bimanual_stats(
             relative_exclude_joints,
         ).to(device=canonical_actions.device, dtype=canonical_actions.dtype)
         canonical_actions = canonical_actions.clone()
-        canonical_actions -= canonical[OBS_STATE][..., :CANONICAL_ACTION_DIM] * relative_mask
+        state_reference = canonical[OBS_STATE][..., :CANONICAL_ACTION_DIM]
+        if canonical_actions.ndim == 3:
+            state_reference = state_reference.unsqueeze(-2)
+        canonical_actions -= state_reference * relative_mask
 
     stats[OBS_STATE] = _compute_masked_stats(canonical[OBS_STATE], state_mask, canonical_state_feature_names())
     stats[ACTION] = _compute_masked_stats(canonical_actions, action_mask, canonical_action_feature_names())

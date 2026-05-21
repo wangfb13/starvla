@@ -14,11 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import json
 import re
 from itertools import chain
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from huggingface_hub import HfApi
@@ -32,7 +34,7 @@ from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.feature_utils import get_hf_features_from_features, hw_to_dataset_features
 from lerobot.datasets.image_writer import image_array_to_pil_image
-from lerobot.datasets.io_utils import hf_transform_to_torch
+from lerobot.datasets.io_utils import hf_transform_to_torch, load_tasks
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.multi_dataset import MultiLeRobotDataset
 from lerobot.datasets.transforms import ImageTransforms, ImageTransformsConfig
@@ -411,6 +413,160 @@ def test_multilerobot_dataset_set_image_transforms_propagates(tmp_path, lerobot_
     dataset.clear_image_transforms()
     assert dataset.image_transforms is None
     assert all(child.image_transforms is None for child in dataset._datasets)
+
+
+def test_load_tasks_prefers_vlm_hybrid_task_over_placeholder_index(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    tasks_path = dataset_root / "meta" / "tasks.parquet"
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "task_index": [0, 1],
+            "vlm_hybrid_task": ["pick up the mug", "place the mug on the tray"],
+            "__index_level_0__": ["unknown task", "Unknown task"],
+        }
+    ).to_parquet(tasks_path)
+
+    tasks = load_tasks(dataset_root)
+
+    assert list(tasks.index) == ["pick up the mug", "place the mug on the tray"]
+    assert tasks.index.name == "task"
+
+
+def test_multilerobot_dataset_remaps_task_index_to_global_schema(tmp_path, empty_lerobot_dataset_factory):
+    root = tmp_path / "multi_task_index"
+    repo_ids = ["lerobot/left_task", "lerobot/right_task"]
+    features = {"state": {"dtype": "float32", "shape": (1,), "names": None}}
+
+    left_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[0], repo_id=repo_ids[0], use_videos=False, features=features
+    )
+    left_dataset.add_frame({"state": torch.zeros(1), "task": "left task"})
+    left_dataset.save_episode()
+
+    right_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[1], repo_id=repo_ids[1], use_videos=False, features=features
+    )
+    right_dataset.add_frame({"state": torch.zeros(1), "task": "right task"})
+    right_dataset.save_episode()
+
+    dataset = MultiLeRobotDataset(repo_ids, root=root, download_videos=False)
+
+    left_item = dataset[0]
+    right_item = dataset[1]
+
+    assert left_item["task"] == "left task"
+    assert right_item["task"] == "right task"
+    assert left_item["task_index"].item() == 0
+    assert right_item["task_index"].item() == 1
+
+
+def test_multilerobot_dataset_unions_visual_keys_and_adds_missing_masks(
+    tmp_path, empty_lerobot_dataset_factory
+):
+    root = tmp_path / "multi_union"
+    repo_ids = ["lerobot/left_only", "lerobot/right_only"]
+    cam_left = "observation.images.cam_left"
+    cam_right = "observation.images.cam_right"
+
+    left_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[0],
+        repo_id=repo_ids[0],
+        features={
+            cam_left: {
+                "dtype": "image",
+                "shape": DUMMY_CHW,
+                "names": ["channels", "height", "width"],
+            }
+        },
+        use_videos=False,
+    )
+    left_dataset.add_frame({cam_left: np.random.rand(*DUMMY_CHW), "task": "Dummy task"})
+    left_dataset.save_episode()
+
+    right_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[1],
+        repo_id=repo_ids[1],
+        features={
+            cam_right: {
+                "dtype": "image",
+                "shape": DUMMY_CHW,
+                "names": ["channels", "height", "width"],
+            }
+        },
+        use_videos=False,
+    )
+    right_dataset.add_frame({cam_right: np.random.rand(*DUMMY_CHW), "task": "Dummy task"})
+    right_dataset.save_episode()
+
+    dataset = MultiLeRobotDataset(repo_ids, root=root, download_videos=False)
+
+    assert set(dataset.meta.features) == {cam_left, cam_right}
+
+    left_item = dataset[0]
+    assert left_item[cam_left].shape == torch.Size(DUMMY_CHW)
+    assert left_item[cam_right].shape == torch.Size(DUMMY_CHW)
+    assert not left_item[f"{cam_left}_is_missing"].item()
+    assert left_item[f"{cam_right}_is_missing"].item()
+
+    right_item = dataset[1]
+    assert right_item[cam_left].shape == torch.Size(DUMMY_CHW)
+    assert right_item[cam_right].shape == torch.Size(DUMMY_CHW)
+    assert right_item[f"{cam_left}_is_missing"].item()
+    assert not right_item[f"{cam_right}_is_missing"].item()
+
+
+def test_info_override_can_add_missing_visual_history_shape(tmp_path, empty_lerobot_dataset_factory):
+    repo_id = "lerobot/left_schema"
+    root = tmp_path / "info_override"
+    cam_left = "observation.images.cam_left"
+    cam_right = "observation.images.cam_right"
+    delta_timestamps = {
+        cam_left: [-1 / 30, 0.0],
+        cam_right: [-1 / 30, 0.0],
+    }
+
+    dataset = empty_lerobot_dataset_factory(
+        root=root / repo_id,
+        repo_id=repo_id,
+        features={
+            cam_left: {
+                "dtype": "image",
+                "shape": DUMMY_CHW,
+                "names": ["channels", "height", "width"],
+            }
+        },
+        use_videos=False,
+    )
+    dataset.add_frame({cam_left: np.random.rand(*DUMMY_CHW), "task": "Dummy task"})
+    dataset.save_episode()
+
+    info_path = root / repo_id / "meta" / "info.json"
+    with info_path.open() as f:
+        info = json.load(f)
+    info["features"][cam_right] = {
+        "dtype": "image",
+        "shape": list(DUMMY_CHW),
+        "names": ["channels", "height", "width"],
+    }
+
+    union_info_path = root / repo_id / "meta" / "info_union.json"
+    with union_info_path.open("w") as f:
+        json.dump(info, f)
+
+    overridden_dataset = LeRobotDataset(
+        repo_id=repo_id,
+        root=root / repo_id,
+        info_path="info_union.json",
+        delta_timestamps=delta_timestamps,
+    )
+    item = overridden_dataset[0]
+
+    assert item[cam_left].shape == torch.Size((2, *DUMMY_CHW))
+    assert item[cam_right].shape == torch.Size((2, *DUMMY_CHW))
+    assert not item[f"{cam_left}_is_missing"].item()
+    assert item[f"{cam_right}_is_missing"].item()
 
 
 def test_image_array_to_pil_image_wrong_range_float_0_255():

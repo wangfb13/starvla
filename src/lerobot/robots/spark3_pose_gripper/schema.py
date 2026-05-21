@@ -306,7 +306,8 @@ def default_action_dict(
     action.update(pose_dict("head_pose", head_pose))
     action.update(pose_dict("hip_pose", hip_pose))
     action.update(base_twist_dict(base_twist))
-    action.update(end_effector_feature_dict(end_effectors))
+    for name, config in end_effectors.items():
+        action.update(end_effector_dict(name, config, [0.0] * config.dofs))
     return action
 
 

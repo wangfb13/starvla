@@ -81,7 +81,12 @@ class DatasetReader:
         self.delta_indices = None
         if delta_timestamps is not None:
             check_delta_timestamps(delta_timestamps, meta.fps, tolerance_s)
-            self.delta_indices = get_delta_indices(delta_timestamps, meta.fps)
+            supported_keys = set(getattr(meta, "reader_features", meta.features))
+            filtered_delta_timestamps = {
+                key: value for key, value in delta_timestamps.items() if key in supported_keys
+            }
+            if len(filtered_delta_timestamps) > 0:
+                self.delta_indices = get_delta_indices(filtered_delta_timestamps, meta.fps)
 
     def try_load(self) -> bool:
         """Attempt to load from local cache. Returns True if data is sufficient."""
@@ -124,7 +129,7 @@ class DatasetReader:
 
     def _load_hf_dataset(self) -> datasets.Dataset:
         """hf_dataset contains all the observations, states, actions, rewards, etc."""
-        features = get_hf_features_from_features(self._meta.features)
+        features = get_hf_features_from_features(self._meta.reader_features)
         hf_dataset = load_nested_dataset(self.root / "data", features=features, episodes=self.episodes)
         hf_dataset.set_transform(hf_transform_to_torch)
         return hf_dataset
@@ -281,7 +286,7 @@ class DatasetReader:
         item["task"] = self._meta.tasks.iloc[task_idx].name
 
         # add subtask information if available
-        if "subtask_index" in self._meta.features and self._meta.subtasks is not None:
+        if "subtask_index" in self._meta.storage_features and self._meta.subtasks is not None:
             subtask_idx = item["subtask_index"].item()
             item["subtask"] = self._meta.subtasks.iloc[subtask_idx].name
 

@@ -43,18 +43,6 @@ def _is_local_lerobot_dataset(root: Path) -> bool:
     )
 
 
-def _resolve_local_info_path(info_path: str | Path | None, root: str | Path | None) -> Path | None:
-    if info_path is None:
-        return None
-
-    resolved = Path(info_path)
-    if not resolved.is_absolute():
-        if root is None:
-            raise ValueError("`dataset.info_path` requires `dataset.root` when given as a relative path.")
-        resolved = Path(root) / resolved
-    return resolved
-
-
 def _discover_child_datasets(root: Path) -> list[str]:
     if not root.exists() or not root.is_dir():
         return []
@@ -101,6 +89,7 @@ def _build_multi_dataset(
     *,
     repo_ids: list[str],
     root: str | Path | None,
+    info_path: str | Path | None,
     cfg: TrainPipelineConfig,
     image_transforms: ImageTransforms | None,
 ) -> MultiLeRobotDataset:
@@ -111,19 +100,15 @@ def _build_multi_dataset(
             "`dataset.episodes` is not supported when `dataset.root` resolves to multiple datasets."
         )
 
-    if cfg.dataset.info_path is not None:
-        raise NotImplementedError("`dataset.info_path` is only supported for a single local dataset.")
-
-    first_root = None if root is None else Path(root) / repo_ids[0]
-    ds_meta = LeRobotDatasetMetadata(repo_ids[0], root=first_root, revision=cfg.dataset.revision)
-    delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
     dataset = MultiLeRobotDataset(
         repo_ids,
         root=root,
-        delta_timestamps=delta_timestamps,
+        info_path=info_path,
+        delta_timestamps=None,
         image_transforms=image_transforms,
         video_backend=cfg.dataset.video_backend,
     )
+    dataset.set_delta_timestamps(resolve_delta_timestamps(cfg.policy, dataset.meta))
     logging.info(
         "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
         f"{pformat(dataset.repo_id_to_index, indent=2)}"
@@ -150,7 +135,8 @@ def resolve_delta_timestamps(
             returns `None` if the resulting dict is empty.
     """
     delta_timestamps = {}
-    for key in ds_meta.features:
+    feature_source = getattr(ds_meta, "reader_features", ds_meta.features)
+    for key in feature_source:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
         if key == ACTION and cfg.action_delta_indices is not None:
@@ -182,7 +168,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
 
     dataset_root = Path(cfg.dataset.root) if cfg.dataset.root is not None else None
     discovered_repo_ids = _discover_child_datasets(dataset_root) if dataset_root is not None else []
-    resolved_info_path = _resolve_local_info_path(cfg.dataset.info_path, dataset_root)
+    info_path = cfg.dataset.info_path
 
     if dataset_root is not None and _is_local_lerobot_dataset(dataset_root):
         if isinstance(cfg.dataset.repo_id, list):
@@ -193,7 +179,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         dataset = _build_single_dataset(
             repo_id=effective_repo_id,
             root=dataset_root,
-            info_path=resolved_info_path,
+            info_path=info_path,
             cfg=cfg,
             image_transforms=image_transforms,
         )
@@ -202,6 +188,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             dataset = _build_multi_dataset(
                 repo_ids=discovered_repo_ids,
                 root=dataset_root,
+                info_path=info_path,
                 cfg=cfg,
                 image_transforms=image_transforms,
             )
@@ -213,7 +200,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             dataset = _build_single_dataset(
                 repo_id=cfg.dataset.repo_id,
                 root=dataset_root / cfg.dataset.repo_id,
-                info_path=None,
+                info_path=info_path,
                 cfg=cfg,
                 image_transforms=image_transforms,
             )
@@ -226,6 +213,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             dataset = _build_multi_dataset(
                 repo_ids=cfg.dataset.repo_id,
                 root=dataset_root,
+                info_path=info_path,
                 cfg=cfg,
                 image_transforms=image_transforms,
             )
@@ -233,7 +221,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         dataset = _build_single_dataset(
             repo_id=cfg.dataset.repo_id,
             root=cfg.dataset.root,
-            info_path=resolved_info_path,
+            info_path=info_path,
             cfg=cfg,
             image_transforms=image_transforms,
         )
@@ -241,6 +229,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         dataset = _build_multi_dataset(
             repo_ids=cfg.dataset.repo_id,
             root=cfg.dataset.root,
+            info_path=info_path,
             cfg=cfg,
             image_transforms=image_transforms,
         )
@@ -251,7 +240,13 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         )
 
     if cfg.dataset.use_imagenet_stats:
-        for key in dataset.meta.camera_keys:
+        visual_feature_keys = [
+            key
+            for key, feature in dataset.meta.features.items()
+            if feature["dtype"] in {"image", "video", "tactile", "depth"}
+        ]
+        for key in visual_feature_keys:
+            dataset.meta.stats.setdefault(key, {})
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 

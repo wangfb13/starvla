@@ -13,11 +13,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
 from bisect import bisect_right
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import datasets
 import pandas as pd
@@ -25,12 +25,11 @@ import torch
 import torch.utils
 
 from lerobot.datasets.compute_stats import aggregate_stats
-from lerobot.datasets.feature_utils import get_hf_features_from_features
+from lerobot.datasets.dataset_metadata import _is_visual_feature, _make_empty_visual_tensor
+from lerobot.datasets.feature_utils import get_delta_indices, get_hf_features_from_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import VideoFrame
 from lerobot.utils.constants import HF_LEROBOT_HOME
-
-logger = logging.getLogger(__name__)
 
 
 def _filter_stats(
@@ -83,6 +82,44 @@ def _aggregate_episodes(datasets_list: list[LeRobotDataset]) -> datasets.Dataset
     return datasets.concatenate_datasets(aggregated)
 
 
+def _collect_multi_features(datasets_list: list[LeRobotDataset]) -> dict[str, dict]:
+    def _feature_signature(feature: dict[str, Any]) -> tuple[Any, tuple[Any, ...], Any]:
+        shape = feature.get("shape")
+        shape_tuple = tuple(shape) if shape is not None else ()
+        return feature.get("dtype"), shape_tuple, feature.get("names")
+
+    features: dict[str, dict] = {}
+    non_visual_keys: set[str] = set()
+
+    for dataset in datasets_list:
+        for key, feature in dataset.features.items():
+            if key in features:
+                if _feature_signature(features[key]) != _feature_signature(feature):
+                    raise ValueError(
+                        f"Feature '{key}' has incompatible specs across datasets. "
+                        f"Expected {features[key]}, got {feature} in {dataset.repo_id}."
+                    )
+            else:
+                features[key] = deepcopy(feature)
+
+            if not _is_visual_feature(feature):
+                non_visual_keys.add(key)
+
+    missing_non_visual: dict[str, list[str]] = {}
+    for dataset in datasets_list:
+        missing = [key for key in non_visual_keys if key not in dataset.features]
+        if missing:
+            missing_non_visual[dataset.repo_id] = missing
+
+    if missing_non_visual:
+        raise ValueError(
+            "All datasets must expose the same non-visual features for mixed training. "
+            f"Missing keys by dataset: {missing_non_visual}"
+        )
+
+    return features
+
+
 class MultiLeRobotDatasetMetadata:
     """Training-oriented metadata adapter for concatenated local datasets."""
 
@@ -90,7 +127,7 @@ class MultiLeRobotDatasetMetadata:
         self,
         datasets_list: list[LeRobotDataset],
         repo_ids: list[str],
-        enabled_feature_keys: list[str],
+        features: dict[str, dict],
         stats: dict[str, dict],
     ):
         if len(datasets_list) == 0:
@@ -101,12 +138,13 @@ class MultiLeRobotDatasetMetadata:
         self.revision = datasets_list[0].revision
         self.root = datasets_list[0].root.parent if len(datasets_list) > 1 else datasets_list[0].root
         self.info = deepcopy(first_meta.info)
-        self.info["features"] = {
-            key: deepcopy(first_meta.features[key]) for key in enabled_feature_keys if key in first_meta.features
-        }
+        self.info["features"] = deepcopy(features)
         self.info["total_frames"] = sum(dataset.num_frames for dataset in datasets_list)
         self.info["total_episodes"] = sum(dataset.num_episodes for dataset in datasets_list)
         self.info["splits"] = {"train": f"0:{self.info['total_episodes']}"}
+        self.info["camera_keys"] = [
+            key for key, feature in self.info["features"].items() if _is_visual_feature(feature)
+        ]
 
         self.tasks = _aggregate_tasks(datasets_list)
         self.subtasks = None
@@ -157,6 +195,51 @@ class MultiLeRobotDatasetMetadata:
     def total_frames(self) -> int:
         return self.info["total_frames"]
 
+    def canonicalize_item(
+        self,
+        item: dict[str, Any],
+        delta_timestamps: dict[str, list[float]] | None = None,
+    ) -> dict[str, Any]:
+        canonical: dict[str, Any] = {}
+
+        for key, feature in self.features.items():
+            if _is_visual_feature(feature):
+                missing_mask_key = f"{key}_is_missing"
+                existing_missing = item.get(missing_mask_key)
+                if existing_missing is not None:
+                    if isinstance(existing_missing, torch.Tensor):
+                        missing = bool(existing_missing.item())
+                    else:
+                        missing = bool(existing_missing)
+                else:
+                    missing = key not in item
+                num_frames = None
+                if delta_timestamps is not None and key in delta_timestamps:
+                    num_frames = len(delta_timestamps[key])
+                canonical[key] = (
+                    item[key] if key in item else _make_empty_visual_tensor(feature, num_frames)
+                )
+                canonical[missing_mask_key] = (
+                    existing_missing
+                    if existing_missing is not None
+                    else torch.tensor(missing, dtype=torch.bool)
+                )
+                continue
+
+            if key not in item:
+                raise KeyError(f"Required non-visual feature '{key}' is missing from multi-dataset item.")
+            canonical[key] = item[key]
+
+        for key, value in item.items():
+            if key in canonical:
+                continue
+            if key in {"episode_index", "frame_index", "index", "timestamp", "task", "subtask", "dataset_index"}:
+                canonical[key] = value
+            elif key.endswith("_is_pad") or key.endswith("_is_missing"):
+                canonical[key] = value
+
+        return canonical
+
 
 class MultiLeRobotDataset(torch.utils.data.Dataset):
     """A dataset consisting of multiple underlying `LeRobotDataset`s.
@@ -169,6 +252,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         self,
         repo_ids: list[str],
         root: str | Path | None = None,
+        info_path: str | Path | None = None,
         episodes: dict | None = None,
         image_transforms: Callable | None = None,
         delta_timestamps: dict[str, list[float]] | None = None,
@@ -187,9 +271,10 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             LeRobotDataset(
                 repo_id,
                 root=self.root / repo_id,
+                info_path=info_path,
                 episodes=episodes[repo_id] if episodes else None,
                 image_transforms=image_transforms,
-                delta_timestamps=delta_timestamps,
+                delta_timestamps=None,
                 tolerance_s=self.tolerances_s[repo_id],
                 download_videos=download_videos,
                 video_backend=video_backend,
@@ -209,49 +294,8 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 f"All datasets must have the same fps to be concatenated. Expected {first_fps}, got {fps_mismatch}."
             )
 
-        # Disable any data keys that are not common across all of the datasets. Note: we may relax this
-        # restriction in future iterations of this class. For now, this is necessary at least for being able
-        # to use PyTorch's default DataLoader collate function.
-        self.disabled_features = set()
-        intersection_features = set(self._datasets[0].features)
-        for ds in self._datasets:
-            intersection_features.intersection_update(ds.features)
-        if len(intersection_features) == 0:
-            raise RuntimeError(
-                "Multiple datasets were provided but they had no keys common to all of them. "
-                "The multi-dataset functionality currently only keeps common keys."
-            )
-
-        self.enabled_feature_keys: list[str] = []
-        first_feature_specs = self._datasets[0].features
-        for key in first_feature_specs:
-            if key not in intersection_features:
-                continue
-
-            if all(dataset.features[key] == first_feature_specs[key] for dataset in self._datasets[1:]):
-                self.enabled_feature_keys.append(key)
-            else:
-                self.disabled_features.add(key)
-                logger.warning(
-                    "key %s was disabled because its feature spec differs across datasets.",
-                    key,
-                )
-
-        for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
-            extra_keys = set(ds.features).difference(self.enabled_feature_keys)
-            if extra_keys:
-                logger.warning(
-                    f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
-                    "other datasets."
-                )
-                self.disabled_features.update(extra_keys)
-
-        if len(self.enabled_feature_keys) == 0:
-            raise RuntimeError(
-                "Multiple datasets were provided but none of their common keys had matching feature specs."
-            )
-
-        self.delta_timestamps = delta_timestamps
+        multi_features = _collect_multi_features(self._datasets)
+        self.enabled_feature_keys = list(multi_features)
         self.episodes = None
         # TODO(rcadene, aliberts): We should not perform this aggregation for datasets
         # with multiple robots of different ranges. Instead we should have one normalization
@@ -263,7 +307,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         self.meta = MultiLeRobotDatasetMetadata(
             self._datasets,
             repo_ids=self.repo_ids,
-            enabled_feature_keys=self.enabled_feature_keys,
+            features=multi_features,
             stats=self.stats,
         )
         self._cumulative_sizes: list[int] = []
@@ -271,7 +315,32 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         for dataset in self._datasets:
             running_size += dataset.num_frames
             self._cumulative_sizes.append(running_size)
+        self.set_delta_timestamps(delta_timestamps)
         self.set_image_transforms(image_transforms)
+
+    def set_delta_timestamps(self, delta_timestamps: dict[str, list[float]] | None) -> None:
+        if delta_timestamps is not None:
+            unsupported_keys = set(delta_timestamps).difference(self.meta.features)
+            if unsupported_keys:
+                raise ValueError(
+                    f"delta_timestamps contains keys that are not exposed by the multi-dataset schema: {sorted(unsupported_keys)}"
+                )
+        self.delta_timestamps = delta_timestamps
+        for dataset in self._datasets:
+            supported_keys = set(getattr(dataset.meta, "reader_features", dataset.meta.features))
+            child_delta_timestamps = None
+            if delta_timestamps is not None:
+                child_delta_timestamps = {
+                    key: value for key, value in delta_timestamps.items() if key in supported_keys
+                }
+                if len(child_delta_timestamps) == 0:
+                    child_delta_timestamps = None
+
+            dataset.delta_timestamps = delta_timestamps
+            if dataset.reader is not None:
+                dataset.reader.delta_indices = None
+                if child_delta_timestamps is not None:
+                    dataset.reader.delta_indices = get_delta_indices(child_delta_timestamps, dataset.meta.fps)
 
     def set_image_transforms(self, image_transforms: Callable | None) -> None:
         """Replace the transform for this dataset and its children."""
@@ -366,12 +435,14 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         dataset_idx = bisect_right(self._cumulative_sizes, idx)
         start_idx = 0 if dataset_idx == 0 else self._cumulative_sizes[dataset_idx - 1]
         item = self._datasets[dataset_idx][idx - start_idx]
+        task = item.get("task")
+        if isinstance(task, str) and self.meta.tasks is not None and "task_index" in item:
+            global_task_index = self.meta.tasks.loc[task, "task_index"]
+            if isinstance(global_task_index, pd.Series):
+                global_task_index = global_task_index.iloc[0]
+            item["task_index"] = torch.tensor(int(global_task_index), dtype=torch.int64)
         item["dataset_index"] = torch.tensor(dataset_idx)
-        for data_key in self.disabled_features:
-            if data_key in item:
-                del item[data_key]
-
-        return item
+        return self.meta.canonicalize_item(item, delta_timestamps=self.delta_timestamps)
 
     def iter_hf_datasets(self):
         for dataset in self._datasets:

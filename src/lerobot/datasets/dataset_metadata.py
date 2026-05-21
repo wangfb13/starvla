@@ -14,13 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import packaging.version
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import torch
 from huggingface_hub import snapshot_download
 
 from lerobot.datasets.compute_stats import aggregate_stats
@@ -52,12 +55,66 @@ from lerobot.datasets.video_utils import get_video_info
 from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE
 
 CODEBASE_VERSION = "v3.0"
+VISUAL_FEATURE_DTYPES = {"image", "video", "tactile", "depth"}
+CHANNEL_NAME_ALIASES = {"channel", "channels"}
 
 
 def _uses_mov_container(video_key: str) -> bool:
     """Return whether a video key should be stored in a `.mov` container."""
     lowered = video_key.lower()
     return any(token in lowered for token in ("deformation", "shear", "depth"))
+
+
+def _is_visual_feature(feature: dict[str, Any]) -> bool:
+    return feature.get("dtype") in VISUAL_FEATURE_DTYPES
+
+
+def _get_visual_tensor_shape(feature: dict[str, Any], num_frames: int | None = None) -> tuple[int, ...]:
+    shape = tuple(feature["shape"])
+    names = feature.get("names")
+    if len(shape) == 3 and names and len(names) == 3:
+        if names[0] not in CHANNEL_NAME_ALIASES and names[-1] in CHANNEL_NAME_ALIASES:
+            shape = (shape[2], shape[0], shape[1])
+    if num_frames is not None and num_frames > 1:
+        shape = (num_frames, *shape)
+    return shape
+
+
+def _make_empty_visual_tensor(feature: dict[str, Any], num_frames: int | None = None) -> torch.Tensor:
+    return torch.zeros(_get_visual_tensor_shape(feature, num_frames=num_frames), dtype=torch.float32)
+
+
+def _merge_info_with_template(base_info: dict, template_info: dict | None) -> dict:
+    if template_info is None:
+        return deepcopy(base_info)
+
+    if "fps" in template_info and template_info["fps"] != base_info["fps"]:
+        raise ValueError(
+            f"Template info fps ({template_info['fps']}) must match dataset fps ({base_info['fps']})."
+        )
+
+    merged = deepcopy(base_info)
+    merged_features: dict[str, dict[str, Any]] = {}
+
+    base_features = base_info.get("features", {})
+    template_features = template_info.get("features", {})
+
+    for key, feature in base_features.items():
+        if not _is_visual_feature(feature) or key in template_features:
+            merged_features[key] = deepcopy(feature)
+
+    for key, feature in template_features.items():
+        if not _is_visual_feature(feature) and key not in base_features:
+            raise ValueError(
+                f"Template info feature '{key}' is not visual and does not exist in the source dataset."
+            )
+        merged_features[key] = deepcopy(feature)
+
+    merged["features"] = merged_features
+    if template_info.get("robot_type") is not None:
+        merged["robot_type"] = template_info["robot_type"]
+
+    return merged
 
 
 class LeRobotDatasetMetadata:
@@ -103,6 +160,8 @@ class LeRobotDatasetMetadata:
         self._requested_root = Path(root) if root is not None else None
         self.root = self._requested_root if self._requested_root is not None else HF_LEROBOT_HOME / repo_id
         self._info_path = Path(info_path) if info_path is not None else None
+        self.storage_info: dict[str, Any] | None = None
+        self._info_template: dict[str, Any] | None = None
         self._pq_writer = None
         self.latest_episode = None
         self._metadata_buffer: list[dict] = []
@@ -181,7 +240,9 @@ class LeRobotDatasetMetadata:
             self.finalize()
 
     def _load_metadata(self):
-        self.info = load_info(self.root, info_path=self._info_path)
+        self.storage_info = load_info(self.root)
+        self._info_template = load_info(self.root, info_path=self._info_path) if self._info_path is not None else None
+        self.info = _merge_info_with_template(self.storage_info, self._info_template)
         check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
         self.tasks = load_tasks(self.root)
         self.subtasks = load_subtasks(self.root)
@@ -225,7 +286,9 @@ class LeRobotDatasetMetadata:
     @property
     def _version(self) -> packaging.version.Version:
         """Codebase version used to create this dataset."""
-        return packaging.version.parse(self.info["codebase_version"])
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return packaging.version.parse(self.storage_info["codebase_version"])
 
     def get_data_file_path(self, ep_index: int) -> Path:
         """Return the relative parquet file path for the given episode index.
@@ -299,17 +362,23 @@ class LeRobotDatasetMetadata:
     @property
     def data_path(self) -> str:
         """Formattable string for the parquet files."""
-        return self.info["data_path"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["data_path"]
 
     @property
     def video_path(self) -> str | None:
         """Formattable string for the video files."""
-        return self.info["video_path"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["video_path"]
 
     @property
     def mov_path(self) -> str | None:
         """Formattable string for mov-backed video files."""
-        return self.info.get("mov_path")
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info.get("mov_path")
 
     @property
     def robot_type(self) -> str | None:
@@ -319,7 +388,9 @@ class LeRobotDatasetMetadata:
     @property
     def fps(self) -> int:
         """Frames per second used during data collection."""
-        return self.info["fps"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["fps"]
 
     @property
     def features(self) -> dict[str, dict]:
@@ -327,21 +398,41 @@ class LeRobotDatasetMetadata:
         return self.info["features"]
 
     @property
+    def storage_features(self) -> dict[str, dict]:
+        """Features physically stored in parquet/video files."""
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["features"]
+
+    @property
+    def reader_features(self) -> dict[str, dict]:
+        """Features that should be materialized from disk for the current training schema."""
+        features: dict[str, dict] = {}
+        effective_features = self.features
+        for key, feature in self.storage_features.items():
+            if _is_visual_feature(feature):
+                if key in effective_features:
+                    features[key] = feature
+            else:
+                features[key] = feature
+        return features
+
+    @property
     def image_keys(self) -> list[str]:
         """Keys to access visual modalities stored as images."""
-        return [key for key, ft in self.features.items() if ft["dtype"] == "image"]
+        return [key for key, ft in self.reader_features.items() if ft["dtype"] == "image"]
 
     @property
     def video_keys(self) -> list[str]:
         """Keys to access visual modalities stored as videos."""
-        return [key for key, ft in self.features.items() if ft["dtype"] in ["video", "tactile", "depth"]]
+        return [key for key, ft in self.reader_features.items() if ft["dtype"] in ["video", "tactile", "depth"]]
 
     @property
     def camera_keys(self) -> list[str]:
         """Keys to access visual modalities (regardless of their storage method)."""
         return [
             key
-            for key, ft in self.features.items()
+            for key, ft in self.reader_features.items()
             if ft["dtype"] in ["video", "image", "tactile", "depth"]
         ]
 
@@ -358,32 +449,83 @@ class LeRobotDatasetMetadata:
     @property
     def total_episodes(self) -> int:
         """Total number of episodes available."""
-        return self.info["total_episodes"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["total_episodes"]
 
     @property
     def total_frames(self) -> int:
         """Total number of frames saved in this dataset."""
-        return self.info["total_frames"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["total_frames"]
 
     @property
     def total_tasks(self) -> int:
         """Total number of different tasks performed in this dataset."""
-        return self.info["total_tasks"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["total_tasks"]
 
     @property
     def chunks_size(self) -> int:
         """Max number of files per chunk."""
-        return self.info["chunks_size"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["chunks_size"]
 
     @property
     def data_files_size_in_mb(self) -> int:
         """Max size of data file in mega bytes."""
-        return self.info["data_files_size_in_mb"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["data_files_size_in_mb"]
 
     @property
     def video_files_size_in_mb(self) -> int:
         """Max size of video file in mega bytes."""
-        return self.info["video_files_size_in_mb"]
+        if self.storage_info is None:
+            raise ValueError("Storage metadata has not been loaded yet.")
+        return self.storage_info["video_files_size_in_mb"]
+
+    @property
+    def uses_info_template(self) -> bool:
+        return self._info_template is not None
+
+    def canonicalize_item(
+        self,
+        item: dict[str, Any],
+        delta_timestamps: dict[str, list[float]] | None = None,
+    ) -> dict[str, Any]:
+        if not self.uses_info_template:
+            return item
+
+        target_features = self.features
+        canonical: dict[str, Any] = {}
+
+        for key, feature in target_features.items():
+            if _is_visual_feature(feature):
+                missing = key not in item
+                num_frames = None
+                if delta_timestamps is not None and key in delta_timestamps:
+                    num_frames = len(delta_timestamps[key])
+                canonical[key] = item[key] if not missing else _make_empty_visual_tensor(feature, num_frames)
+                canonical[f"{key}_is_missing"] = torch.tensor(missing, dtype=torch.bool)
+                continue
+
+            if key not in item:
+                raise KeyError(f"Required non-visual feature '{key}' is missing from dataset item.")
+            canonical[key] = item[key]
+
+        for key, value in item.items():
+            if key in canonical:
+                continue
+            if key in {"episode_index", "frame_index", "index", "timestamp", "task", "subtask", "dataset_index"}:
+                canonical[key] = value
+            elif key.endswith("_is_pad") or key.endswith("_is_missing"):
+                canonical[key] = value
+
+        return canonical
 
     def get_task_index(self, task: str) -> int | None:
         """
@@ -653,6 +795,8 @@ class LeRobotDatasetMetadata:
         obj.repo_id = repo_id
         obj._requested_root = Path(root) if root is not None else None
         obj.root = obj._requested_root if obj._requested_root is not None else HF_LEROBOT_HOME / repo_id
+        obj._info_path = None
+        obj._info_template = None
 
         obj.root.mkdir(parents=True, exist_ok=False)
 
@@ -673,6 +817,7 @@ class LeRobotDatasetMetadata:
             data_files_size_in_mb,
             video_files_size_in_mb,
         )
+        obj.storage_info = deepcopy(obj.info)
         if len(obj.video_keys) > 0 and not use_videos:
             raise ValueError(
                 f"Features contain video keys {obj.video_keys}, but 'use_videos' is set to False. "

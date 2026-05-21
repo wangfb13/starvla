@@ -34,8 +34,10 @@ class DatasetConfig:
     # If None, local datasets are looked up under $HF_LEROBOT_HOME/repo_id and Hub downloads use a
     # revision-safe cache under $HF_LEROBOT_HOME/hub.
     root: str | None = None
-    # Optional override for the dataset metadata file. Intended for local datasets only.
-    # When set, this path is used instead of `<dataset root>/meta/info.json`.
+    # Optional local metadata template/override.
+    # - absolute paths reuse the same file across datasets
+    # - relative paths are resolved under each local dataset root
+    # This is useful for selecting a shared visual schema (e.g. fisheye-only cameras).
     info_path: str | None = None
     episodes: list[int] | None = None
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)

@@ -455,7 +455,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if reader.hf_dataset is None:
             # One-shot load after finalize()
             reader.load_and_activate()
-        return reader.get_item(idx)
+        return self.meta.canonicalize_item(reader.get_item(idx), delta_timestamps=self.delta_timestamps)
 
     def select_columns(self, column_names: str | list[str]):
         """Select specific columns from the underlying dataset.

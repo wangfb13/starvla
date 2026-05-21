@@ -161,6 +161,11 @@ def load_info(local_dir: Path, info_path: str | Path | None = None) -> dict:
         dict: The dataset information dictionary.
     """
     info_file = Path(info_path) if info_path is not None else local_dir / INFO_PATH
+    if not info_file.is_absolute():
+        info_file = local_dir / info_file
+        requested_info = Path(info_path) if info_path is not None else Path(INFO_PATH)
+        if info_path is not None and not info_file.exists() and requested_info.parent == Path("."):
+            info_file = local_dir / "meta" / requested_info
     info = load_json(info_file)
     for ft in info["features"].values():
         ft["shape"] = tuple(ft["shape"])
@@ -214,17 +219,83 @@ def write_tasks(tasks: pandas.DataFrame, local_dir: Path) -> None:
     tasks.to_parquet(path)
 
 
+def _has_string_like_index(df: pandas.DataFrame) -> bool:
+    return pandas.api.types.is_object_dtype(df.index.dtype) or pandas.api.types.is_string_dtype(df.index.dtype)
+
+
+def _extract_string_index_labels(df: pandas.DataFrame, column_names: tuple[str, ...]) -> list[str] | None:
+    for column_name in column_names:
+        if column_name not in df.columns:
+            continue
+
+        series = df[column_name]
+        values = series.tolist()
+        if all(isinstance(value, str) for value in values):
+            return values
+
+    return None
+
+
+def _is_placeholder_task_labels(values: list[str]) -> bool:
+    if len(values) == 0:
+        return False
+
+    normalized = [value.strip().lower() for value in values]
+    placeholder_values = {"unknown task", "task", "placeholder task"}
+    return all(value in placeholder_values for value in normalized)
+
+
+def _normalize_indexed_labels(
+    df: pandas.DataFrame,
+    *,
+    index_name: str,
+    fallback_columns: tuple[str, ...],
+    placeholder_fallback_columns: tuple[str, ...] = (),
+) -> pandas.DataFrame:
+    normalized = df.copy()
+    labels: list[str] | None = None
+
+    if _has_string_like_index(normalized):
+        index_values = normalized.index.tolist()
+        if all(isinstance(value, str) for value in index_values):
+            labels = index_values
+
+    if labels is None:
+        labels = _extract_string_index_labels(normalized, fallback_columns)
+
+    if labels is not None and placeholder_fallback_columns and _is_placeholder_task_labels(labels):
+        preferred_labels = _extract_string_index_labels(normalized, placeholder_fallback_columns)
+        if preferred_labels is not None:
+            labels = preferred_labels
+
+    if labels is not None:
+        normalized.index = pd.Index(labels, name=index_name)
+    else:
+        normalized.index.name = index_name
+
+    return normalized
+
+
 def load_tasks(local_dir: Path) -> pandas.DataFrame:
     tasks = pd.read_parquet(local_dir / DEFAULT_TASKS_PATH)
-    tasks.index.name = "task"
-    return tasks
+    return _normalize_indexed_labels(
+        tasks,
+        index_name="task",
+        fallback_columns=("task", "__index_level_0__"),
+        placeholder_fallback_columns=("vlm_hybrid_task",),
+    )
 
 
 def load_subtasks(local_dir: Path) -> pandas.DataFrame | None:
     """Load subtasks from subtasks.parquet if it exists."""
     subtasks_path = local_dir / DEFAULT_SUBTASKS_PATH
     if subtasks_path.exists():
-        return pd.read_parquet(subtasks_path)
+        subtasks = pd.read_parquet(subtasks_path)
+        return _normalize_indexed_labels(
+            subtasks,
+            index_name="subtask",
+            fallback_columns=("subtask", "__index_level_0__"),
+        )
     return None
 
 

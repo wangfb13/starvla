@@ -223,6 +223,46 @@ def resize_with_pad_torch(  # see openpi `resize_with_pad_torch` (exact copy)
     return padded_images
 
 
+def resize_without_pad_torch(
+    images: torch.Tensor,
+    height: int,
+    width: int,
+    mode: str = "bilinear",
+) -> torch.Tensor:
+    """Resize images to a target size without padding.
+
+    Keeps the same input/output layout handling as ``resize_with_pad_torch``.
+    """
+    if images.shape[-1] <= 4:
+        channels_last = True
+        if images.dim() == 3:
+            images = images.unsqueeze(0)
+        images = images.permute(0, 3, 1, 2)
+    else:
+        channels_last = False
+        if images.dim() == 3:
+            images = images.unsqueeze(0)
+
+    resized_images = F.interpolate(
+        images,
+        size=(height, width),
+        mode=mode,
+        align_corners=False if mode == "bilinear" else None,
+    )
+
+    if images.dtype == torch.uint8:
+        resized_images = torch.round(resized_images).clamp(0, 255).to(torch.uint8)
+    elif images.dtype == torch.float32:
+        resized_images = resized_images.clamp(0.0, 1.0)
+    else:
+        raise ValueError(f"Unsupported image dtype: {images.dtype}")
+
+    if channels_last:
+        resized_images = resized_images.permute(0, 2, 3, 1)
+
+    return resized_images
+
+
 # Define the complete layer computation function for gradient checkpointing
 def compute_layer_complete(
     layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond, paligemma, gemma_expert
@@ -1204,7 +1244,8 @@ class PI05Policy(PreTrainedPolicy):
 
             # from openpi preprocess_observation_pytorch: Resize with padding if needed
             if img.shape[1:3] != self.config.image_resolution:
-                img = resize_with_pad_torch(img, *self.config.image_resolution)
+                # img = resize_with_pad_torch(img, *self.config.image_resolution)
+                img = resize_without_pad_torch(img, *self.config.image_resolution)
 
             # Normalize from [0,1] to [-1,1] as expected by siglip
             img = img * 2.0 - 1.0
@@ -1214,9 +1255,11 @@ class PI05Policy(PreTrainedPolicy):
                 img = img.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
 
             images.append(img)
-            # Create mask (all ones for real images)
             bsize = img.shape[0]
             mask = torch.ones(bsize, dtype=torch.bool, device=device)
+            missing_mask_key = f"{key}_is_missing"
+            if missing_mask_key in batch:
+                mask = ~batch[missing_mask_key].to(device=device, dtype=torch.bool)
             img_masks.append(mask)
 
         # Create image features not present in the batch as fully 0 padded images
