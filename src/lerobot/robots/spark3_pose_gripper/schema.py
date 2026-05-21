@@ -19,62 +19,74 @@ DEFAULT_HIP_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 DEFAULT_BASE_TWIST = [0.0, 0.0]
 
 PI0_OBSERVATION_STATE_NAMES = (
-    "left_arm_pose.x",
-    "left_arm_pose.y",
-    "left_arm_pose.z",
-    "left_arm_pose.qx",
-    "left_arm_pose.qy",
-    "left_arm_pose.qz",
-    "left_arm_pose.qw",
-    "right_arm_pose.x",
-    "right_arm_pose.y",
-    "right_arm_pose.z",
-    "right_arm_pose.qx",
-    "right_arm_pose.qy",
-    "right_arm_pose.qz",
-    "right_arm_pose.qw",
-    "arm_left_1.pos",
-    "arm_left_2.pos",
-    "arm_left_3.pos",
-    "arm_left_4.pos",
-    "arm_left_5.pos",
-    "arm_left_6.pos",
-    "arm_left_7.pos",
-    "arm_right_1.pos",
-    "arm_right_2.pos",
-    "arm_right_3.pos",
-    "arm_right_4.pos",
-    "arm_right_5.pos",
-    "arm_right_6.pos",
-    "arm_right_7.pos",
-    "head_pitch.pos",
-    "head_yaw.pos",
-    "left_gripper.pos",
-    "right_gripper.pos",
+    "main_left_x",
+    "main_left_y",
+    "main_left_z",
+    "main_left_qx",
+    "main_left_qy",
+    "main_left_qz",
+    "main_left_w",
+    "main_right_x",
+    "main_right_y",
+    "main_right_z",
+    "main_right_qx",
+    "main_right_qy",
+    "main_right_qz",
+    "main_right_w",
+    "main_head_x",
+    "main_head_y",
+    "main_head_z",
+    "main_head_qx",
+    "main_head_qy",
+    "main_head_qz",
+    "main_head_w",
+    "main_arm_left_1",
+    "main_arm_left_2",
+    "main_arm_left_3",
+    "main_arm_left_4",
+    "main_arm_left_5",
+    "main_arm_left_6",
+    "main_arm_left_7",
+    "main_arm_right_1",
+    "main_arm_right_2",
+    "main_arm_right_3",
+    "main_arm_right_4",
+    "main_arm_right_5",
+    "main_arm_right_6",
+    "main_arm_right_7",
+    "main_head_pitch",
+    "main_head_yaw",
+    "main_hip_pitch",
+    "main_hip_yaw",
+    "main_knee",
+    "main_left_wheel",
+    "main_right_wheel",
+    "main_gripper_left",
+    "main_gripper_right",
 )
 
 DEFAULT_JOINT_NAME_MAPPING = {
-    "arm_left_1_joint": "arm_left_1",
-    "arm_left_2_joint": "arm_left_2",
-    "arm_left_3_joint": "arm_left_3",
-    "arm_left_4_joint": "arm_left_4",
-    "arm_left_5_joint": "arm_left_5",
-    "arm_left_6_joint": "arm_left_6",
-    "arm_left_7_joint": "arm_left_7",
-    "arm_right_1_joint": "arm_right_1",
-    "arm_right_2_joint": "arm_right_2",
-    "arm_right_3_joint": "arm_right_3",
-    "arm_right_4_joint": "arm_right_4",
-    "arm_right_5_joint": "arm_right_5",
-    "arm_right_6_joint": "arm_right_6",
-    "arm_right_7_joint": "arm_right_7",
-    "head_pitch_joint": "head_pitch",
-    "head_yaw_joint": "head_yaw",
-    "hip_pitch_joint": "hip_pitch",
-    "hip_yaw_joint": "hip_yaw",
-    "knee_joint": "knee",
-    "left_wheel_joint": "left_wheel",
-    "right_wheel_joint": "right_wheel",
+    "arm_left_1_joint": "main_arm_left_1",
+    "arm_left_2_joint": "main_arm_left_2",
+    "arm_left_3_joint": "main_arm_left_3",
+    "arm_left_4_joint": "main_arm_left_4",
+    "arm_left_5_joint": "main_arm_left_5",
+    "arm_left_6_joint": "main_arm_left_6",
+    "arm_left_7_joint": "main_arm_left_7",
+    "arm_right_1_joint": "main_arm_right_1",
+    "arm_right_2_joint": "main_arm_right_2",
+    "arm_right_3_joint": "main_arm_right_3",
+    "arm_right_4_joint": "main_arm_right_4",
+    "arm_right_5_joint": "main_arm_right_5",
+    "arm_right_6_joint": "main_arm_right_6",
+    "arm_right_7_joint": "main_arm_right_7",
+    "head_pitch_joint": "main_head_pitch",
+    "head_yaw_joint": "main_head_yaw",
+    "hip_pitch_joint": "main_hip_pitch",
+    "hip_yaw_joint": "main_hip_yaw",
+    "knee_joint": "main_knee",
+    "left_wheel_joint": "main_left_wheel",
+    "right_wheel_joint": "main_right_wheel",
 }
 
 
@@ -120,13 +132,13 @@ def default_joint_name_mapping() -> dict[str, str]:
 
 def default_end_effectors() -> dict[str, Spark3EndEffectorConfig]:
     return {
-        "left_gripper": Spark3EndEffectorConfig(
+        "main_gripper_left": Spark3EndEffectorConfig(
             command_topic="/left_gripper_command",
             state_topic="/left_gripper_state",
             dofs=1,
             source="left",
         ),
-        "right_gripper": Spark3EndEffectorConfig(
+        "main_gripper_right": Spark3EndEffectorConfig(
             command_topic="/right_gripper_command",
             state_topic="/right_gripper_state",
             dofs=1,
@@ -145,8 +157,18 @@ def ordered_joint_names(joint_name_mapping: dict[str, str]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _legacy_pose_component(component: str) -> str:
+    return "w" if component == "qw" else component
+
+
+def _pose_feature_name(prefix: str, component: str) -> str:
+    if prefix.startswith("main_"):
+        return f"{prefix}_{_legacy_pose_component(component)}"
+    return f"{prefix}.{component}"
+
+
 def pose_feature_names(prefix: str) -> list[str]:
-    return [f"{prefix}.{component}" for component in POSE_COMPONENTS]
+    return [_pose_feature_name(prefix, component) for component in POSE_COMPONENTS]
 
 
 def pose_feature_dict(prefix: str) -> dict[str, type]:
@@ -159,15 +181,39 @@ def pose_dict(prefix: str, values: list[float] | tuple[float, ...]) -> dict[str,
             f"{prefix} expects {len(POSE_COMPONENTS)} values, got {len(values)}."
         )
     return {
-        f"{prefix}.{component}": float(value)
+        _pose_feature_name(prefix, component): float(value)
         for component, value in zip(POSE_COMPONENTS, values, strict=True)
     }
+
+
+def pose_aliases(prefix: str, component: str) -> list[str]:
+    legacy_component = _legacy_pose_component(component)
+    aliases = [_pose_feature_name(prefix, component)]
+
+    if prefix == "left_arm_pose":
+        aliases.extend([f"main_left_{legacy_component}", f"left_{component}"])
+    elif prefix == "right_arm_pose":
+        aliases.extend([f"main_right_{legacy_component}", f"right_{component}"])
+    elif prefix == "head_pose":
+        aliases.extend([f"main_head_{legacy_component}", f"head_{component}"])
+    elif prefix == "hip_pose":
+        aliases.extend([f"main_hip_{legacy_component}", f"hip_{component}"])
+
+    return aliases
 
 
 def pose_values_from_action(
     action: dict[str, Any], prefix: str, default: list[float] | tuple[float, ...]
 ) -> list[float]:
-    return [float(action.get(f"{prefix}.{component}", default[idx])) for idx, component in enumerate(POSE_COMPONENTS)]
+    values = []
+    for idx, component in enumerate(POSE_COMPONENTS):
+        value = default[idx]
+        for key in pose_aliases(prefix, component):
+            if key in action:
+                value = action[key]
+                break
+        values.append(float(value))
+    return values
 
 
 def extract_pose_values(pose: Any) -> list[float]:
@@ -183,7 +229,7 @@ def extract_pose_values(pose: Any) -> list[float]:
 
 
 def base_twist_feature_dict() -> dict[str, type]:
-    return {f"base_twist.{component}": float for component in BASE_TWIST_COMPONENTS}
+    return {"main_v": float, "main_w": float}
 
 
 def base_twist_dict(values: list[float] | tuple[float, ...]) -> dict[str, float]:
@@ -191,28 +237,31 @@ def base_twist_dict(values: list[float] | tuple[float, ...]) -> dict[str, float]
         raise ValueError(
             f"base twist expects {len(BASE_TWIST_COMPONENTS)} values, got {len(values)}."
         )
-    return {
-        f"base_twist.{component}": float(value)
-        for component, value in zip(BASE_TWIST_COMPONENTS, values, strict=True)
-    }
+    return {"main_v": float(values[0]), "main_w": float(values[1])}
 
 
 def base_twist_values_from_action(
     action: dict[str, Any], default: list[float] | tuple[float, ...]
 ) -> list[float]:
-    return [float(action.get(f"base_twist.{component}", default[idx])) for idx, component in enumerate(BASE_TWIST_COMPONENTS)]
+    return [
+        float(action.get("main_v", action.get("base_twist.linear", default[0]))),
+        float(action.get("main_w", action.get("base_twist.angular", default[1]))),
+    ]
 
 
 def end_effector_components(config: Spark3EndEffectorConfig) -> list[str]:
     if config.component_names:
         return list(config.component_names)
     if config.dofs == 1:
-        return ["pos"]
+        return [""]
     return [f"joint_{idx}" for idx in range(config.dofs)]
 
 
 def end_effector_feature_names(name: str, config: Spark3EndEffectorConfig) -> list[str]:
-    return [f"{name}.{component}" for component in end_effector_components(config)]
+    return [
+        name if component == "" else f"{name}.{component}"
+        for component in end_effector_components(config)
+    ]
 
 
 def end_effector_feature_dict(
@@ -244,10 +293,20 @@ def end_effector_values_from_action(
     default: list[float] | tuple[float, ...] | None = None,
 ) -> list[float]:
     fallback = list(default) if default is not None else [0.0] * config.dofs
-    return [
-        float(action.get(feature_name, fallback[idx]))
-        for idx, feature_name in enumerate(end_effector_feature_names(name, config))
-    ]
+    values = []
+    for idx, feature_name in enumerate(end_effector_feature_names(name, config)):
+        aliases = [feature_name]
+        if name == "main_gripper_left":
+            aliases.extend(["left_gripper.pos", "gripper_left", "left_gripper"])
+        elif name == "main_gripper_right":
+            aliases.extend(["right_gripper.pos", "gripper_right", "right_gripper"])
+        value = fallback[idx]
+        for key in aliases:
+            if key in action:
+                value = action[key]
+                break
+        values.append(float(value))
+    return values
 
 
 def sensor_feature_names(name: str, config: Spark3ObservationTopicConfig) -> list[str]:
@@ -301,10 +360,10 @@ def default_action_dict(
     base_twist: list[float] | tuple[float, ...] = DEFAULT_BASE_TWIST,
 ) -> dict[str, float]:
     action: dict[str, float] = {}
-    action.update(pose_dict("left_arm_pose", left_arm_pose))
-    action.update(pose_dict("right_arm_pose", right_arm_pose))
-    action.update(pose_dict("head_pose", head_pose))
-    action.update(pose_dict("hip_pose", hip_pose))
+    action.update(pose_dict("main_left", left_arm_pose))
+    action.update(pose_dict("main_right", right_arm_pose))
+    action.update(pose_dict("main_head", head_pose))
+    action.update(pose_dict("main_hip", hip_pose))
     action.update(base_twist_dict(base_twist))
     for name, config in end_effectors.items():
         action.update(end_effector_dict(name, config, [0.0] * config.dofs))
@@ -325,10 +384,10 @@ def action_dict_from_observation(
 
 def action_feature_dict(end_effectors: dict[str, Spark3EndEffectorConfig]) -> dict[str, type]:
     features: dict[str, type] = {}
-    features.update(pose_feature_dict("left_arm_pose"))
-    features.update(pose_feature_dict("right_arm_pose"))
-    features.update(pose_feature_dict("head_pose"))
-    features.update(pose_feature_dict("hip_pose"))
+    features.update(pose_feature_dict("main_left"))
+    features.update(pose_feature_dict("main_right"))
+    features.update(pose_feature_dict("main_head"))
+    features.update(pose_feature_dict("main_hip"))
     features.update(base_twist_feature_dict())
     features.update(end_effector_feature_dict(end_effectors))
     return features
@@ -343,10 +402,10 @@ def observation_feature_dict(
     state_names: tuple[str, ...] | None = None,
 ) -> dict[str, type | tuple[int, int, int]]:
     features: dict[str, type | tuple[int, int, int]] = {}
-    features.update(pose_feature_dict("left_arm_pose"))
-    features.update(pose_feature_dict("right_arm_pose"))
-    features.update(pose_feature_dict("head_pose"))
-    features.update({f"{joint_name}.pos": float for joint_name in joint_names})
+    features.update(pose_feature_dict("main_left"))
+    features.update(pose_feature_dict("main_right"))
+    features.update(pose_feature_dict("main_head"))
+    features.update({joint_name: float for joint_name in joint_names})
     features.update(end_effector_feature_dict(end_effectors))
     features.update(sensor_feature_dict(sensors))
     features.update(camera_features)
@@ -421,18 +480,18 @@ def parse_goal_pose_message(
 ) -> dict[str, float]:
     whole_pose = getattr(msg, "wbc_whole_pose", msg)
     action: dict[str, float] = {}
-    action.update(pose_dict("left_arm_pose", extract_pose_values(whole_pose.left_arm_goal_pose.pose)))
-    action.update(pose_dict("right_arm_pose", extract_pose_values(whole_pose.right_arm_goal_pose.pose)))
+    action.update(pose_dict("main_left", extract_pose_values(whole_pose.left_arm_goal_pose.pose)))
+    action.update(pose_dict("main_right", extract_pose_values(whole_pose.right_arm_goal_pose.pose)))
 
     if hasattr(whole_pose, "head_goal_pose"):
-        action.update(pose_dict("head_pose", extract_pose_values(whole_pose.head_goal_pose.pose)))
+        action.update(pose_dict("main_head", extract_pose_values(whole_pose.head_goal_pose.pose)))
     else:
-        action.update(pose_dict("head_pose", default_head_pose))
+        action.update(pose_dict("main_head", default_head_pose))
 
     if hasattr(whole_pose, "hip_goal_pose") and hasattr(whole_pose.hip_goal_pose, "pose"):
-        action.update(pose_dict("hip_pose", extract_pose_values(whole_pose.hip_goal_pose.pose)))
+        action.update(pose_dict("main_hip", extract_pose_values(whole_pose.hip_goal_pose.pose)))
     else:
-        action.update(pose_dict("hip_pose", default_hip_pose))
+        action.update(pose_dict("main_hip", default_hip_pose))
 
     linear_velocity = float(getattr(whole_pose, "linear_velocity", default_base_twist[0]))
     angular_velocity = float(getattr(whole_pose, "angular_velocity", default_base_twist[1]))
@@ -452,9 +511,9 @@ def parse_goal_pose_message(
 
 def parse_state_pose_message(msg: Any) -> dict[str, float]:
     obs: dict[str, float] = {}
-    obs.update(pose_dict("left_arm_pose", extract_pose_values(msg.left_arm_state_pose.pose)))
-    obs.update(pose_dict("right_arm_pose", extract_pose_values(msg.right_arm_state_pose.pose)))
-    obs.update(pose_dict("head_pose", extract_pose_values(msg.head_state_pose.pose)))
+    obs.update(pose_dict("main_left", extract_pose_values(msg.left_arm_state_pose.pose)))
+    obs.update(pose_dict("main_right", extract_pose_values(msg.right_arm_state_pose.pose)))
+    obs.update(pose_dict("main_head", extract_pose_values(msg.head_state_pose.pose)))
     return obs
 
 
@@ -466,7 +525,7 @@ def parse_joint_state_message(
     for idx, joint_name in enumerate(msg.name):
         mapped_name = joint_name_mapping.get(joint_name)
         if mapped_name is None and joint_name.endswith("_joint"):
-            mapped_name = joint_name.removesuffix("_joint")
+            mapped_name = f"main_{joint_name.removesuffix('_joint')}"
         if mapped_name is None:
             continue
         if idx >= len(msg.position):

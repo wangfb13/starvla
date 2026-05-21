@@ -56,6 +56,7 @@ from lerobot.datasets.video_utils import (
     concatenate_video_files,
     encode_video_frames,
     get_video_duration_in_s,
+    get_video_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -497,7 +498,12 @@ class DatasetWriter:
 
         # Update video info (only needed when first episode is encoded)
         if episode_index == 0:
-            self._meta.update_video_info(video_key)
+            video_path = self._root / self._meta.get_video_file_path_from_indices(
+                video_key=video_key,
+                chunk_index=chunk_idx,
+                file_index=file_idx,
+            )
+            self._meta.info["features"][video_key]["info"] = get_video_info(video_path)
             write_info(self._meta.info, self._meta.root)
 
         metadata = {

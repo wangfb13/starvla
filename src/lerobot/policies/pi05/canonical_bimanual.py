@@ -96,10 +96,59 @@ def _find_all_indices(names: list[str] | None, expected: list[str]) -> tuple[int
 
 
 def build_arm_source_spec(names: list[str] | None, arm: str) -> ArmSourceSpec:
+    pose_prefixes = [f"{arm}_arm_pose", f"{arm}_pose", f"main_{arm}"]
     pos_indices = _find_all_indices(names, [f"{arm}_x", f"{arm}_y", f"{arm}_z"])
+    if pos_indices is None:
+        for pose_prefix in pose_prefixes:
+            if pose_prefix.startswith("main_"):
+                pos_indices = _find_all_indices(
+                    names, [f"{pose_prefix}_x", f"{pose_prefix}_y", f"{pose_prefix}_z"]
+                )
+            else:
+                pos_indices = _find_all_indices(
+                    names, [f"{pose_prefix}.x", f"{pose_prefix}.y", f"{pose_prefix}.z"]
+                )
+            if pos_indices is not None:
+                break
+
     rot6d_indices = _find_all_indices(names, [f"{arm}_rot6d_{i}" for i in range(6)])
     quat_indices = _find_all_indices(names, [f"{arm}_qx", f"{arm}_qy", f"{arm}_qz", f"{arm}_qw"])
-    gripper_index = _find_index(names, [f"gripper_{arm}", f"{arm}_gripper", "gripper"])
+    if quat_indices is None:
+        for pose_prefix in pose_prefixes:
+            if pose_prefix.startswith("main_"):
+                quat_indices = _find_all_indices(
+                    names,
+                    [
+                        f"{pose_prefix}_qx",
+                        f"{pose_prefix}_qy",
+                        f"{pose_prefix}_qz",
+                        f"{pose_prefix}_w",
+                    ],
+                )
+            else:
+                quat_indices = _find_all_indices(
+                    names,
+                    [
+                        f"{pose_prefix}.qx",
+                        f"{pose_prefix}.qy",
+                        f"{pose_prefix}.qz",
+                        f"{pose_prefix}.qw",
+                    ],
+                )
+            if quat_indices is not None:
+                break
+
+    gripper_index = _find_index(
+        names,
+        [
+            f"gripper_{arm}",
+            f"{arm}_gripper",
+            f"{arm}_gripper.pos",
+            f"{arm}_gripper.position",
+            f"main_gripper_{arm}",
+            "gripper",
+        ],
+    )
     return ArmSourceSpec(
         pos_indices=pos_indices if pos_indices is not None and len(pos_indices) == 3 else None,
         rot6d_indices=rot6d_indices if rot6d_indices is not None and len(rot6d_indices) == 6 else None,
