@@ -272,6 +272,8 @@ def make_pre_post_processors(
             policy configuration type.
     """
     if pretrained_path:
+        preprocessor_overrides = dict(kwargs.get("preprocessor_overrides", {}) or {})
+
         # TODO(Steven): Temporary patch, implement correctly the processors for Gr00t
         if isinstance(policy_cfg, GrootConfig):
             # GROOT handles normalization in groot_pack_inputs_v3 step
@@ -292,6 +294,31 @@ def make_pre_post_processors(
             }
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
+
+        if isinstance(policy_cfg, PI05Config) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
+            # Older saved PI0.5 preprocessors may omit canonical source feature names.
+            # Rehydrate them from the policy config so local datasets can still be canonicalized correctly.
+            pi05_canonical_overrides = preprocessor_overrides.setdefault(
+                "pi05_canonicalize_bimanual_rot6d", {}
+            )
+            pi05_canonical_overrides.setdefault(
+                "source_action_feature_names", getattr(policy_cfg, "source_action_feature_names", None)
+            )
+            pi05_canonical_overrides.setdefault(
+                "source_state_feature_names", getattr(policy_cfg, "source_state_feature_names", None)
+            )
+            pi05_canonical_overrides.setdefault(
+                "missing_value", getattr(policy_cfg, "canonical_missing_value", None)
+            )
+            pi05_canonical_overrides.setdefault(
+                "action_mask_observation_key",
+                getattr(policy_cfg, "action_mask_observation_key", "observation.action_mask"),
+            )
+            pi05_canonical_overrides.setdefault(
+                "state_mask_observation_key",
+                getattr(policy_cfg, "state_mask_observation_key", "observation.state_mask"),
+            )
+            kwargs["preprocessor_overrides"] = preprocessor_overrides
 
         preprocessor = PolicyProcessorPipeline.from_pretrained(
             pretrained_model_name_or_path=pretrained_path,
