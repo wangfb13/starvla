@@ -324,14 +324,14 @@ def canonical_bimanual_action_to_pose_gripper_dict(
 
         robot_action.update(
             {
-                f"{arm}_arm_pose.x": float(arm_action[0]),
-                f"{arm}_arm_pose.y": float(arm_action[1]),
-                f"{arm}_arm_pose.z": float(arm_action[2]),
-                f"{arm}_arm_pose.qx": float(quat[0]),
-                f"{arm}_arm_pose.qy": float(quat[1]),
-                f"{arm}_arm_pose.qz": float(quat[2]),
-                f"{arm}_arm_pose.qw": float(quat[3]),
-                f"{arm}_gripper.pos": float(arm_action[9]),
+                f"main_{arm}_x": float(arm_action[0]),
+                f"main_{arm}_y": float(arm_action[1]),
+                f"main_{arm}_z": float(arm_action[2]),
+                f"main_{arm}_qx": float(quat[0]),
+                f"main_{arm}_qy": float(quat[1]),
+                f"main_{arm}_qz": float(quat[2]),
+                f"main_{arm}_w": float(quat[3]),
+                f"main_gripper_{arm}": float(arm_action[9]),
             }
         )
 

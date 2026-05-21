@@ -121,6 +121,21 @@ def _maybe_convert_pi05_canonical_action_to_robot_action(
             arm_valid=arm_valid,
         )
     )
+    print(
+        "[pi05-action-debug] arm_valid=%s main_left=(%.4f, %.4f, %.4f) main_right=(%.4f, %.4f, %.4f) gripper=(%.4f, %.4f)"
+        % (
+            arm_valid,
+            robot_action.get("main_left_x", float("nan")),
+            robot_action.get("main_left_y", float("nan")),
+            robot_action.get("main_left_z", float("nan")),
+            robot_action.get("main_right_x", float("nan")),
+            robot_action.get("main_right_y", float("nan")),
+            robot_action.get("main_right_z", float("nan")),
+            robot_action.get("main_gripper_left", float("nan")),
+            robot_action.get("main_gripper_right", float("nan")),
+        ),
+        flush=True,
+    )
     return robot_action
 
 

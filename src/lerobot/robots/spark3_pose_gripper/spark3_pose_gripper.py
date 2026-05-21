@@ -348,7 +348,7 @@ class Spark3PoseGripper(Robot):
             joint_positions = dict(self._joint_positions)
 
         for joint_name in self._joint_names:
-            obs[f"{joint_name}.pos"] = float(joint_positions.get(joint_name, 0.0))
+            obs[joint_name] = float(joint_positions.get(joint_name, 0.0))
 
         for handle in self._end_effector_handles.values():
             obs.update(handle.observation())
