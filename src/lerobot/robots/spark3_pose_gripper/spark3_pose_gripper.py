@@ -30,7 +30,10 @@ from .schema import (
     parse_sensor_message_values,
     parse_state_pose_message,
     PI0_OBSERVATION_STATE_NAMES,
+    pose_dict,
+    pose_values_flange_to_tcp,
     pose_values_from_action,
+    pose_values_tcp_to_flange,
     sensor_dict,
     split_camera_observation,
 )
@@ -147,15 +150,34 @@ class Spark3PoseGripper(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
         self._joint_names = ordered_joint_names(config.joint_name_mapping)
         self._joint_positions = {joint_name: 0.0 for joint_name in self._joint_names}
-        self._pose_observation = {
-            **default_action_dict(
-                {},
-                left_arm_pose=config.default_left_arm_pose,
-                right_arm_pose=config.default_right_arm_pose,
-                head_pose=config.default_head_pose,
-                hip_pose=config.default_hip_pose,
-                base_twist=config.default_base_twist,
+        initial_pose_observation = default_action_dict(
+            {},
+            left_arm_pose=config.default_left_arm_pose,
+            right_arm_pose=config.default_right_arm_pose,
+            head_pose=config.default_head_pose,
+            hip_pose=config.default_hip_pose,
+            base_twist=config.default_base_twist,
+        )
+        initial_pose_observation.update(
+            pose_dict(
+                "main_left",
+                pose_values_flange_to_tcp(
+                    config.default_left_arm_pose,
+                    config.left_flange_to_tcp_transform,
+                ),
             )
+        )
+        initial_pose_observation.update(
+            pose_dict(
+                "main_right",
+                pose_values_flange_to_tcp(
+                    config.default_right_arm_pose,
+                    config.right_flange_to_tcp_transform,
+                ),
+            )
+        )
+        self._pose_observation = {
+            **initial_pose_observation
         }
         self._last_action = default_action_dict(
             config.end_effectors,
@@ -164,6 +186,24 @@ class Spark3PoseGripper(Robot):
             head_pose=config.default_head_pose,
             hip_pose=config.default_hip_pose,
             base_twist=config.default_base_twist,
+        )
+        self._last_action.update(
+            pose_dict(
+                "main_left",
+                pose_values_flange_to_tcp(
+                    config.default_left_arm_pose,
+                    config.left_flange_to_tcp_transform,
+                ),
+            )
+        )
+        self._last_action.update(
+            pose_dict(
+                "main_right",
+                pose_values_flange_to_tcp(
+                    config.default_right_arm_pose,
+                    config.right_flange_to_tcp_transform,
+                ),
+            )
         )
         self._is_connected = False
         self._state_ready = Event()
@@ -298,7 +338,11 @@ class Spark3PoseGripper(Robot):
 
     def _handle_pose_state(self, msg: Any) -> None:
         with self._state_lock:
-            self._pose_observation = parse_state_pose_message(msg)
+            self._pose_observation = parse_state_pose_message(
+                msg,
+                left_flange_to_tcp_transform=self.config.left_flange_to_tcp_transform,
+                right_flange_to_tcp_transform=self.config.right_flange_to_tcp_transform,
+            )
         self._state_ready.set()
 
     def _handle_joint_state(self, msg: Any) -> None:
@@ -323,11 +367,19 @@ class Spark3PoseGripper(Robot):
         if self._ros is None:
             raise RuntimeError("ROS runtime is not initialized.")
         msg = self._ros.WbcPoseExpand()
+        left_pose = pose_values_tcp_to_flange(
+            pose_values_from_action(action, "left_arm_pose", self.config.default_left_arm_pose),
+            self.config.left_flange_to_tcp_transform,
+        )
         msg.left_arm_goal_pose = self._make_pose_stamped(
-            pose_values_from_action(action, "left_arm_pose", self.config.default_left_arm_pose)
+            left_pose
+        )
+        right_pose = pose_values_tcp_to_flange(
+            pose_values_from_action(action, "right_arm_pose", self.config.default_right_arm_pose),
+            self.config.right_flange_to_tcp_transform,
         )
         msg.right_arm_goal_pose = self._make_pose_stamped(
-            pose_values_from_action(action, "right_arm_pose", self.config.default_right_arm_pose)
+            right_pose
         )
         msg.head_goal_pose = self._make_pose_stamped(
             pose_values_from_action(action, "head_pose", self.config.default_head_pose)

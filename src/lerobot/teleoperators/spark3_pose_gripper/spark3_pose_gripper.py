@@ -13,7 +13,13 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from lerobot.robots.spark3_pose_gripper.ros_utils import ensure_ros_node, load_ros_runtime
-from lerobot.robots.spark3_pose_gripper.schema import action_feature_dict, default_action_dict, parse_goal_pose_message
+from lerobot.robots.spark3_pose_gripper.schema import (
+    action_feature_dict,
+    default_action_dict,
+    parse_goal_pose_message,
+    pose_dict,
+    pose_values_flange_to_tcp,
+)
 
 from .config_spark3_pose_gripper import Spark3PoseGripperTeleoperatorConfig
 
@@ -34,6 +40,24 @@ class Spark3PoseGripperTeleoperator(Teleoperator):
             head_pose=config.default_head_pose,
             hip_pose=config.default_hip_pose,
             base_twist=config.default_base_twist,
+        )
+        self._latest_action.update(
+            pose_dict(
+                "main_left",
+                pose_values_flange_to_tcp(
+                    config.default_left_arm_pose,
+                    config.left_flange_to_tcp_transform,
+                ),
+            )
+        )
+        self._latest_action.update(
+            pose_dict(
+                "main_right",
+                pose_values_flange_to_tcp(
+                    config.default_right_arm_pose,
+                    config.right_flange_to_tcp_transform,
+                ),
+            )
         )
         self._action_lock = Lock()
         self._action_ready = Event()
@@ -93,6 +117,8 @@ class Spark3PoseGripperTeleoperator(Teleoperator):
             default_head_pose=self.config.default_head_pose,
             default_hip_pose=self.config.default_hip_pose,
             default_base_twist=self.config.default_base_twist,
+            left_flange_to_tcp_transform=self.config.left_flange_to_tcp_transform,
+            right_flange_to_tcp_transform=self.config.right_flange_to_tcp_transform,
         )
         with self._action_lock:
             self._latest_action = action

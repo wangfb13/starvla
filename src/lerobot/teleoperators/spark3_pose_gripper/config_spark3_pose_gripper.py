@@ -12,7 +12,10 @@ from lerobot.robots.spark3_pose_gripper.schema import (
     DEFAULT_LEFT_ARM_POSE,
     DEFAULT_RIGHT_ARM_POSE,
     Spark3EndEffectorConfig,
+    Spark3PoseTransformConfig,
     default_end_effectors,
+    default_left_flange_to_tcp_transform,
+    default_right_flange_to_tcp_transform,
 )
 
 
@@ -23,6 +26,16 @@ class Spark3PoseGripperTeleoperatorConfig(TeleoperatorConfig):
     connect_timeout_s: float = 10.0
     ros_node_name: str = "lerobot_spark3_pose_gripper_teleoperator"
     end_effectors: dict[str, Spark3EndEffectorConfig] = field(default_factory=default_end_effectors)
+    # Keep teleop action parsing on the same TCP preset as the robot config.
+    # To switch to v2, replace this factory with the `_v2` helper in `schema.py`.
+    left_flange_to_tcp_transform: Spark3PoseTransformConfig | None = field(
+        default_factory=default_left_flange_to_tcp_transform
+    )
+    # Keep teleop action parsing on the same TCP preset as the robot config.
+    # To switch to v2, replace this factory with the `_v2` helper in `schema.py`.
+    right_flange_to_tcp_transform: Spark3PoseTransformConfig | None = field(
+        default_factory=default_right_flange_to_tcp_transform
+    )
     default_left_arm_pose: list[float] = field(default_factory=lambda: DEFAULT_LEFT_ARM_POSE.copy())
     default_right_arm_pose: list[float] = field(default_factory=lambda: DEFAULT_RIGHT_ARM_POSE.copy())
     default_head_pose: list[float] = field(default_factory=lambda: DEFAULT_HEAD_POSE.copy())

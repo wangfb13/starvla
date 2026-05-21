@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
+from lerobot.utils.rotation import Rotation
+
 POSE_COMPONENTS = ("x", "y", "z", "qx", "qy", "qz", "qw")
 BASE_TWIST_COMPONENTS = ("linear", "angular")
 
@@ -17,6 +21,31 @@ DEFAULT_RIGHT_ARM_POSE = [0.19165, -0.221378, 1.130936, 0.011698, -0.701645, -0.
 DEFAULT_HEAD_POSE = [0.0, 0.0, 1.7, 0.0, 0.0, 0.0, 1.0]
 DEFAULT_HIP_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 DEFAULT_BASE_TWIST = [0.0, 0.0]
+DEFAULT_LEFT_FLANGE_TO_TCP_TRANSFORM = [
+    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.004],
+    [0.0, 0.0, -1.0, -0.12],
+    [0.0, 0.0, 0.0, 1.0],
+]
+DEFAULT_RIGHT_FLANGE_TO_TCP_TRANSFORM = [
+    [0.0, -1.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0, -0.004],
+    [0.0, 0.0, -1.0, -0.12],
+    [0.0, 0.0, 0.0, 1.0],
+]
+# Alternative TCP preset kept for quick switching if the real robot is using v2.
+DEFAULT_LEFT_FLANGE_TO_TCP_TRANSFORM_V2 = [
+    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.01035],
+    [0.0, 0.0, -1.0, -0.12971],
+    [0.0, 0.0, 0.0, 1.0],
+]
+DEFAULT_RIGHT_FLANGE_TO_TCP_TRANSFORM_V2 = [
+    [0.0, -1.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0, -0.01035],
+    [0.0, 0.0, -1.0, -0.12971],
+    [0.0, 0.0, 0.0, 1.0],
+]
 
 PI0_OBSERVATION_STATE_NAMES = (
     "main_left_x",
@@ -126,6 +155,22 @@ class Spark3ObservationTopicConfig:
             raise ValueError("Scalar sensor topics can define at most one output key.")
 
 
+@dataclass
+class Spark3PoseTransformConfig:
+    transform_matrix: list[list[float]]
+
+    def __post_init__(self) -> None:
+        matrix = np.asarray(self.transform_matrix, dtype=float)
+        if matrix.shape != (4, 4):
+            raise ValueError(f"`transform_matrix` must be 4x4, got shape {matrix.shape}.")
+        if not np.all(np.isfinite(matrix)):
+            raise ValueError("`transform_matrix` must contain only finite values.")
+        self.transform_matrix = matrix.tolist()
+
+    def as_numpy(self) -> np.ndarray:
+        return np.asarray(self.transform_matrix, dtype=float)
+
+
 def default_joint_name_mapping() -> dict[str, str]:
     return dict(DEFAULT_JOINT_NAME_MAPPING)
 
@@ -145,6 +190,24 @@ def default_end_effectors() -> dict[str, Spark3EndEffectorConfig]:
             source="right",
         ),
     }
+
+
+def default_left_flange_to_tcp_transform() -> Spark3PoseTransformConfig:
+    return Spark3PoseTransformConfig(transform_matrix=[row.copy() for row in DEFAULT_LEFT_FLANGE_TO_TCP_TRANSFORM])
+
+
+def default_right_flange_to_tcp_transform() -> Spark3PoseTransformConfig:
+    return Spark3PoseTransformConfig(transform_matrix=[row.copy() for row in DEFAULT_RIGHT_FLANGE_TO_TCP_TRANSFORM])
+
+
+def default_left_flange_to_tcp_transform_v2() -> Spark3PoseTransformConfig:
+    return Spark3PoseTransformConfig(transform_matrix=[row.copy() for row in DEFAULT_LEFT_FLANGE_TO_TCP_TRANSFORM_V2])
+
+
+def default_right_flange_to_tcp_transform_v2() -> Spark3PoseTransformConfig:
+    return Spark3PoseTransformConfig(
+        transform_matrix=[row.copy() for row in DEFAULT_RIGHT_FLANGE_TO_TCP_TRANSFORM_V2]
+    )
 
 
 def ordered_joint_names(joint_name_mapping: dict[str, str]) -> tuple[str, ...]:
@@ -226,6 +289,46 @@ def extract_pose_values(pose: Any) -> list[float]:
         float(pose.orientation.z),
         float(pose.orientation.w),
     ]
+
+
+def _pose_values_to_transform_matrix(values: list[float] | tuple[float, ...]) -> np.ndarray:
+    if len(values) != len(POSE_COMPONENTS):
+        raise ValueError(f"Expected {len(POSE_COMPONENTS)} pose values, got {len(values)}.")
+
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = Rotation.from_quat(np.asarray(values[3:], dtype=float)).as_matrix()
+    transform[:3, 3] = np.asarray(values[:3], dtype=float)
+    return transform
+
+
+def _transform_matrix_to_pose_values(transform: np.ndarray) -> list[float]:
+    rotation = Rotation.from_matrix(transform[:3, :3]).as_quat().tolist()
+    translation = transform[:3, 3].tolist()
+    return [*translation, *rotation]
+
+
+def pose_values_flange_to_tcp(
+    values: list[float] | tuple[float, ...],
+    transform_config: Spark3PoseTransformConfig | None,
+) -> list[float]:
+    if transform_config is None:
+        return [float(value) for value in values]
+
+    flange_pose = _pose_values_to_transform_matrix(values)
+    tcp_pose = flange_pose @ transform_config.as_numpy()
+    return _transform_matrix_to_pose_values(tcp_pose)
+
+
+def pose_values_tcp_to_flange(
+    values: list[float] | tuple[float, ...],
+    transform_config: Spark3PoseTransformConfig | None,
+) -> list[float]:
+    if transform_config is None:
+        return [float(value) for value in values]
+
+    tcp_pose = _pose_values_to_transform_matrix(values)
+    flange_pose = tcp_pose @ np.linalg.inv(transform_config.as_numpy())
+    return _transform_matrix_to_pose_values(flange_pose)
 
 
 def base_twist_feature_dict() -> dict[str, type]:
@@ -477,11 +580,21 @@ def parse_goal_pose_message(
     default_head_pose: list[float] | tuple[float, ...] = DEFAULT_HEAD_POSE,
     default_hip_pose: list[float] | tuple[float, ...] = DEFAULT_HIP_POSE,
     default_base_twist: list[float] | tuple[float, ...] = DEFAULT_BASE_TWIST,
+    left_flange_to_tcp_transform: Spark3PoseTransformConfig | None = None,
+    right_flange_to_tcp_transform: Spark3PoseTransformConfig | None = None,
 ) -> dict[str, float]:
     whole_pose = getattr(msg, "wbc_whole_pose", msg)
     action: dict[str, float] = {}
-    action.update(pose_dict("main_left", extract_pose_values(whole_pose.left_arm_goal_pose.pose)))
-    action.update(pose_dict("main_right", extract_pose_values(whole_pose.right_arm_goal_pose.pose)))
+    left_pose = pose_values_flange_to_tcp(
+        extract_pose_values(whole_pose.left_arm_goal_pose.pose),
+        left_flange_to_tcp_transform,
+    )
+    right_pose = pose_values_flange_to_tcp(
+        extract_pose_values(whole_pose.right_arm_goal_pose.pose),
+        right_flange_to_tcp_transform,
+    )
+    action.update(pose_dict("main_left", left_pose))
+    action.update(pose_dict("main_right", right_pose))
 
     if hasattr(whole_pose, "head_goal_pose"):
         action.update(pose_dict("main_head", extract_pose_values(whole_pose.head_goal_pose.pose)))
@@ -509,10 +622,23 @@ def parse_goal_pose_message(
     return action
 
 
-def parse_state_pose_message(msg: Any) -> dict[str, float]:
+def parse_state_pose_message(
+    msg: Any,
+    *,
+    left_flange_to_tcp_transform: Spark3PoseTransformConfig | None = None,
+    right_flange_to_tcp_transform: Spark3PoseTransformConfig | None = None,
+) -> dict[str, float]:
     obs: dict[str, float] = {}
-    obs.update(pose_dict("main_left", extract_pose_values(msg.left_arm_state_pose.pose)))
-    obs.update(pose_dict("main_right", extract_pose_values(msg.right_arm_state_pose.pose)))
+    left_pose = pose_values_flange_to_tcp(
+        extract_pose_values(msg.left_arm_state_pose.pose),
+        left_flange_to_tcp_transform,
+    )
+    right_pose = pose_values_flange_to_tcp(
+        extract_pose_values(msg.right_arm_state_pose.pose),
+        right_flange_to_tcp_transform,
+    )
+    obs.update(pose_dict("main_left", left_pose))
+    obs.update(pose_dict("main_right", right_pose))
     obs.update(pose_dict("main_head", extract_pose_values(msg.head_state_pose.pose)))
     return obs
 

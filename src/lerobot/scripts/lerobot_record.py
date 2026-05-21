@@ -459,10 +459,10 @@ def record_loop(
                 )
             continue
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+        # Send action to robot. The dataset frame below still records `action_values`,
+        # i.e. the pre-send action representation produced by the policy/teleop path.
+        # If robot-side conversion or clipping is introduced, the recorded dataset action
+        # remains whatever was stored in `action_values`, not `_sent_action`.
         _sent_action = robot.send_action(robot_action_to_send)
 
         # Write to dataset (only on real policy frames, not interpolated-only iterations)
