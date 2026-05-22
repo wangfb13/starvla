@@ -36,6 +36,8 @@ class PI05Config(PreTrainedConfig):
     n_obs_steps: int = 1
     chunk_size: int = 50  # Number of action steps to predict, in openpi called "action_horizon"
     n_action_steps: int = 50  # Number of action steps to execute
+    action_gap_frames: int = 0  # Future action offset applied before chunk sampling
+    action_gap_dataset_overrides: list[str] = field(default_factory=list)
 
     # Shorter state and action vectors will be padded to these dimensions
     max_state_dim: int = 32
@@ -122,6 +124,19 @@ class PI05Config(PreTrainedConfig):
             raise ValueError(
                 f"n_action_steps ({self.n_action_steps}) cannot be greater than chunk_size ({self.chunk_size})"
             )
+        if self.action_gap_frames < 0:
+            raise ValueError("action_gap_frames must be non-negative.")
+        if self.action_gap_dataset_overrides:
+            seen_dataset_indices: set[int] = set()
+            for spec in self.action_gap_dataset_overrides:
+                dataset_index, gap_frames = self.parse_action_gap_dataset_override(spec)
+                if dataset_index in seen_dataset_indices:
+                    raise ValueError(
+                        "action_gap_dataset_overrides cannot contain duplicate dataset indices."
+                    )
+                seen_dataset_indices.add(dataset_index)
+                if gap_frames < 0:
+                    raise ValueError("action_gap_dataset_overrides must use non-negative gap values.")
 
         if self.paligemma_variant not in ["gemma_300m", "gemma_2b"]:
             raise ValueError(f"Invalid paligemma_variant: {self.paligemma_variant}")
@@ -179,7 +194,37 @@ class PI05Config(PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size))
+        start = int(self.action_gap_frames)
+        return list(range(start, start + self.chunk_size))
+
+    @staticmethod
+    def parse_action_gap_dataset_override(spec: str) -> tuple[int, int]:
+        parts = str(spec).split(":", maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid action_gap_dataset_overrides entry '{spec}'. Expected 'dataset_index:gap_frames'."
+            )
+        dataset_index = int(parts[0])
+        gap_frames = int(parts[1])
+        if dataset_index < 0:
+            raise ValueError("action_gap_dataset_overrides must use non-negative dataset indices.")
+        if gap_frames < 0:
+            raise ValueError("action_gap_dataset_overrides must use non-negative gap values.")
+        return dataset_index, gap_frames
+
+    @property
+    def action_gap_frames_by_dataset_index(self) -> dict[int, int]:
+        overrides: dict[int, int] = {}
+        for spec in self.action_gap_dataset_overrides:
+            dataset_index, gap_frames = self.parse_action_gap_dataset_override(spec)
+            overrides[dataset_index] = gap_frames
+        return overrides
+
+    def get_action_delta_indices(self, dataset_index: int | None = None) -> list:
+        start = int(self.action_gap_frames)
+        if dataset_index is not None and self.action_gap_dataset_overrides:
+            start = int(self.action_gap_frames_by_dataset_index.get(int(dataset_index), start))
+        return list(range(start, start + self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:

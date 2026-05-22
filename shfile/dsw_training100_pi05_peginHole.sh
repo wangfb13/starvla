@@ -23,6 +23,7 @@ nohup python src/lerobot/scripts/lerobot_train.py \
     --policy.tokenizer_name=/mnt/tacumi_data/huggingface/paligemma-3b-pt-224 \
     --policy.use_relative_actions=true \
     --policy.relative_exclude_joints='["gripper"]' \
+    --policy.action_gap_frames=6 \
     --policy.canonicalize_bimanual_rot6d=true \
     --policy.canonical_missing_value=9930.0 \
     --policy.push_to_hub=false \

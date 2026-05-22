@@ -13,10 +13,13 @@
 # limitations under the License.
 import pytest
 
+from lerobot.datasets.factory import resolve_delta_timestamps
 from lerobot.datasets.feature_utils import (
     check_delta_timestamps,
     get_delta_indices,
 )
+from lerobot.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.utils.constants import ACTION
 from tests.fixtures.constants import DUMMY_MOTOR_FEATURES
 
 
@@ -136,3 +139,34 @@ def test_delta_indices(valid_delta_timestamps_factory, delta_indices_factory):
     expected_delta_indices = delta_indices_factory(min_max_range=min_max_range)
     actual_delta_indices = get_delta_indices(delta_timestamps, fps)
     assert expected_delta_indices == actual_delta_indices
+
+
+def test_pi05_action_gap_frames_shift_action_indices():
+    cfg = PI05Config(chunk_size=4, n_action_steps=4, action_gap_frames=6)
+
+    assert cfg.action_delta_indices == [6, 7, 8, 9]
+    assert cfg.get_action_delta_indices(dataset_index=0) == [6, 7, 8, 9]
+
+
+def test_pi05_action_gap_dataset_overrides():
+    cfg = PI05Config(
+        chunk_size=3,
+        n_action_steps=3,
+        action_gap_frames=2,
+        action_gap_dataset_overrides=["1:5"],
+    )
+
+    assert cfg.get_action_delta_indices(dataset_index=0) == [2, 3, 4]
+    assert cfg.get_action_delta_indices(dataset_index=1) == [5, 6, 7]
+
+
+def test_resolve_delta_timestamps_uses_pi05_action_gap():
+    class DummyMeta:
+        fps = 10
+        features = {ACTION: {"dtype": "float32", "shape": (2,), "names": None}}
+
+    cfg = PI05Config(chunk_size=4, n_action_steps=4, action_gap_frames=6)
+
+    delta_timestamps = resolve_delta_timestamps(cfg, DummyMeta(), dataset_index=0)
+
+    assert delta_timestamps[ACTION] == pytest.approx([0.6, 0.7, 0.8, 0.9])

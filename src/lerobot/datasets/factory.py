@@ -58,7 +58,7 @@ def _build_single_dataset(
     image_transforms: ImageTransforms | None,
 ):
     ds_meta = LeRobotDatasetMetadata(repo_id, root=root, revision=cfg.dataset.revision, info_path=info_path)
-    delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+    delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta, dataset_index=0)
     if not cfg.dataset.streaming:
         return LeRobotDataset(
             repo_id,
@@ -108,7 +108,14 @@ def _build_multi_dataset(
         image_transforms=image_transforms,
         video_backend=cfg.dataset.video_backend,
     )
-    dataset.set_delta_timestamps(resolve_delta_timestamps(cfg.policy, dataset.meta))
+    if getattr(cfg.policy, "action_gap_dataset_overrides", None):
+        delta_timestamps_by_repo = {
+            repo_id: resolve_delta_timestamps(cfg.policy, child_dataset.meta, dataset_index=dataset_index)
+            for dataset_index, (repo_id, child_dataset) in enumerate(zip(repo_ids, dataset.iter_datasets()))
+        }
+        dataset.set_delta_timestamps(delta_timestamps_by_repo)
+    else:
+        dataset.set_delta_timestamps(resolve_delta_timestamps(cfg.policy, dataset.meta))
     logging.info(
         "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
         f"{pformat(dataset.repo_id_to_index, indent=2)}"
@@ -116,8 +123,22 @@ def _build_multi_dataset(
     return dataset
 
 
+def _resolve_action_delta_indices(
+    cfg: PreTrainedConfig,
+    dataset_index: int | None = None,
+) -> list | None:
+    if dataset_index is not None:
+        getter = getattr(cfg, "get_action_delta_indices", None)
+        if callable(getter):
+            return getter(dataset_index)
+    return cfg.action_delta_indices
+
+
 def resolve_delta_timestamps(
-    cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetadata
+    cfg: PreTrainedConfig,
+    ds_meta: LeRobotDatasetMetadata,
+    *,
+    dataset_index: int | None = None,
 ) -> dict[str, list] | None:
     """Resolves delta_timestamps by reading from the 'delta_indices' properties of the PreTrainedConfig.
 
@@ -135,12 +156,13 @@ def resolve_delta_timestamps(
             returns `None` if the resulting dict is empty.
     """
     delta_timestamps = {}
+    action_delta_indices = _resolve_action_delta_indices(cfg, dataset_index)
     feature_source = getattr(ds_meta, "reader_features", ds_meta.features)
     for key in feature_source:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        if key == ACTION and cfg.action_delta_indices is not None:
-            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
+        if key == ACTION and action_delta_indices is not None:
+            delta_timestamps[key] = [i / ds_meta.fps for i in action_delta_indices]
         if key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
 

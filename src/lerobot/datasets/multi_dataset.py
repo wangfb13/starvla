@@ -318,25 +318,40 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         self.set_delta_timestamps(delta_timestamps)
         self.set_image_transforms(image_transforms)
 
-    def set_delta_timestamps(self, delta_timestamps: dict[str, list[float]] | None) -> None:
-        if delta_timestamps is not None:
-            unsupported_keys = set(delta_timestamps).difference(self.meta.features)
-            if unsupported_keys:
-                raise ValueError(
-                    f"delta_timestamps contains keys that are not exposed by the multi-dataset schema: {sorted(unsupported_keys)}"
-                )
-        self.delta_timestamps = delta_timestamps
+    def set_delta_timestamps(self, delta_timestamps: dict[str, Any] | None) -> None:
+        per_repo_delta_timestamps = (
+            delta_timestamps is not None
+            and set(delta_timestamps).issubset(self.repo_ids)
+            and all(value is None or isinstance(value, dict) for value in delta_timestamps.values())
+        )
+
+        if per_repo_delta_timestamps:
+            self.delta_timestamps = delta_timestamps
+            self._delta_timestamps_by_repo = {
+                repo_id: delta_timestamps.get(repo_id) for repo_id in self.repo_ids
+            }
+        else:
+            if delta_timestamps is not None:
+                unsupported_keys = set(delta_timestamps).difference(self.meta.features)
+                if unsupported_keys:
+                    raise ValueError(
+                        "delta_timestamps contains keys that are not exposed by the multi-dataset schema: "
+                        f"{sorted(unsupported_keys)}"
+                    )
+            self.delta_timestamps = delta_timestamps
+            self._delta_timestamps_by_repo = dict.fromkeys(self.repo_ids, delta_timestamps)
+
         for dataset in self._datasets:
             supported_keys = set(getattr(dataset.meta, "reader_features", dataset.meta.features))
-            child_delta_timestamps = None
-            if delta_timestamps is not None:
+            child_delta_timestamps = self._delta_timestamps_by_repo.get(dataset.repo_id)
+            if child_delta_timestamps is not None:
                 child_delta_timestamps = {
-                    key: value for key, value in delta_timestamps.items() if key in supported_keys
+                    key: value for key, value in child_delta_timestamps.items() if key in supported_keys
                 }
                 if len(child_delta_timestamps) == 0:
                     child_delta_timestamps = None
 
-            dataset.delta_timestamps = delta_timestamps
+            dataset.delta_timestamps = child_delta_timestamps
             if dataset.reader is not None:
                 dataset.reader.delta_indices = None
                 if child_delta_timestamps is not None:
@@ -442,11 +457,16 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 global_task_index = global_task_index.iloc[0]
             item["task_index"] = torch.tensor(int(global_task_index), dtype=torch.int64)
         item["dataset_index"] = torch.tensor(dataset_idx)
-        return self.meta.canonicalize_item(item, delta_timestamps=self.delta_timestamps)
+        repo_id = self.repo_ids[dataset_idx]
+        delta_timestamps = self._delta_timestamps_by_repo.get(repo_id)
+        return self.meta.canonicalize_item(item, delta_timestamps=delta_timestamps)
 
     def iter_hf_datasets(self):
         for dataset in self._datasets:
             yield dataset.hf_dataset
+
+    def iter_datasets(self):
+        yield from self._datasets
 
     def __repr__(self):
         return (

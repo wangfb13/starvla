@@ -380,3 +380,12 @@ src/lerobot/scripts/lerobot_train.py \
 - 改了哪些 state/action 表示
 - 是否影响 `stats.json` 的生成口径
 - 是否影响 checkpoint 加载兼容性
+
+
+## 15. umi数据多文件夹训练方法
+  - step1：先挑选用来训练的数据，将所有数据的绝对目录一行一个写到一个txt文件中，如/shfile/groupA_roots.txt
+  - step2：执行下面的sh文件，创建数据的软链接
+    cd /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5
+    sh create_dataset_symlinks_from_txt.sh groupA_roots.txt /mnt/cpfs/datasets/pi05_groupA_train_roots_symlink
+  - 训练时指定新创建的软链接目录，如--dataset.root=/mnt/cpfs/datasets/pi05_groupA_train_roots_symlink
+
