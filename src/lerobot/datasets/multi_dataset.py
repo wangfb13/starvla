@@ -25,11 +25,134 @@ import torch
 import torch.utils
 
 from lerobot.datasets.compute_stats import aggregate_stats
-from lerobot.datasets.dataset_metadata import _is_visual_feature, _make_empty_visual_tensor
+from lerobot.datasets.dataset_metadata import (
+    _get_visual_tensor_shape,
+    _is_visual_feature,
+    _make_empty_visual_tensor,
+)
 from lerobot.datasets.feature_utils import get_delta_indices, get_hf_features_from_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import VideoFrame
 from lerobot.utils.constants import HF_LEROBOT_HOME
+
+SPARKY_SINGLE_LEFT_IMAGE = "observation.images.cam_left"
+SPARKY_SINGLE_RIGHT_IMAGE = "observation.images.cam_right"
+SPARKY_DUAL_LEFT_IMAGE = "observation.images.left_cam_left"
+SPARKY_DUAL_RIGHT_IMAGE = "observation.images.right_cam_right"
+SPARKY_LEFT_HAND_LEFT_TACTILE = "observation.depth_deformation.tactile_left_left"
+SPARKY_LEFT_HAND_RIGHT_TACTILE = "observation.depth_deformation.tactile_right_left"
+SPARKY_RIGHT_HAND_LEFT_TACTILE = "observation.depth_deformation.tactile_left_right"
+SPARKY_RIGHT_HAND_RIGHT_TACTILE = "observation.depth_deformation.tactile_right_right"
+
+
+def _infer_sparky_visual_aliases(features: dict[str, dict]) -> dict[str, str]:
+    """Map known Sparky single/dual-arm visual keys into a shared canonical schema."""
+    aliases: dict[str, str] = {}
+
+    if SPARKY_DUAL_LEFT_IMAGE in features and SPARKY_SINGLE_LEFT_IMAGE not in features:
+        aliases[SPARKY_DUAL_LEFT_IMAGE] = SPARKY_SINGLE_LEFT_IMAGE
+    if SPARKY_DUAL_RIGHT_IMAGE in features and SPARKY_SINGLE_RIGHT_IMAGE not in features:
+        aliases[SPARKY_DUAL_RIGHT_IMAGE] = SPARKY_SINGLE_RIGHT_IMAGE
+
+    is_right_only = (
+        SPARKY_SINGLE_RIGHT_IMAGE in features
+        and SPARKY_SINGLE_LEFT_IMAGE not in features
+        and SPARKY_LEFT_HAND_LEFT_TACTILE in features
+        and SPARKY_LEFT_HAND_RIGHT_TACTILE in features
+        and SPARKY_RIGHT_HAND_LEFT_TACTILE not in features
+        and SPARKY_RIGHT_HAND_RIGHT_TACTILE not in features
+    )
+    if is_right_only:
+        aliases[SPARKY_LEFT_HAND_LEFT_TACTILE] = SPARKY_RIGHT_HAND_LEFT_TACTILE
+        aliases[SPARKY_LEFT_HAND_RIGHT_TACTILE] = SPARKY_RIGHT_HAND_RIGHT_TACTILE
+
+    return aliases
+
+
+def _canonical_feature_key(key: str, aliases: dict[str, str]) -> str:
+    return aliases.get(key, key)
+
+
+def _canonicalize_stats_keys(stats: dict[str, dict], aliases: dict[str, str]) -> dict[str, dict]:
+    canonical_stats: dict[str, dict] = {}
+    for key, value in stats.items():
+        canonical_key = _canonical_feature_key(key, aliases)
+        if canonical_key not in canonical_stats:
+            canonical_stats[canonical_key] = value
+    return canonical_stats
+
+
+def _apply_item_feature_aliases(item: dict[str, Any], aliases: dict[str, str]) -> dict[str, Any]:
+    if not aliases:
+        return item
+
+    item = dict(item)
+    for source_key, target_key in aliases.items():
+        if source_key in item and target_key not in item:
+            item[target_key] = item[source_key]
+        if source_key != target_key:
+            # Treat aliases as renames so right-hand single-arm tactile data does not
+            # also look like valid left-hand tactile data after canonicalization.
+            item.pop(source_key, None)
+
+        source_pad_key = f"{source_key}_is_pad"
+        target_pad_key = f"{target_key}_is_pad"
+        if source_pad_key in item and target_pad_key not in item:
+            item[target_pad_key] = item[source_pad_key]
+        if source_pad_key != target_pad_key:
+            item.pop(source_pad_key, None)
+
+        source_missing_key = f"{source_key}_is_missing"
+        target_missing_key = f"{target_key}_is_missing"
+        if source_missing_key in item and target_missing_key not in item:
+            item[target_missing_key] = item[source_missing_key]
+        if source_missing_key != target_missing_key:
+            item.pop(source_missing_key, None)
+
+    return item
+
+
+def _delta_timestamps_for_reader(
+    delta_timestamps: dict[str, list[float]] | None,
+    aliases: dict[str, str],
+    supported_keys: set[str],
+) -> dict[str, list[float]] | None:
+    if delta_timestamps is None:
+        return None
+
+    reader_delta_timestamps: dict[str, list[float]] = {}
+    reverse_aliases = {target_key: source_key for source_key, target_key in aliases.items()}
+    for key, value in delta_timestamps.items():
+        reader_key = key if key in supported_keys else reverse_aliases.get(key)
+        if reader_key in supported_keys:
+            reader_delta_timestamps[reader_key] = value
+
+    return reader_delta_timestamps or None
+
+
+def _align_visual_tensor_to_feature_shape(
+    value: Any,
+    feature: dict[str, Any],
+    num_frames: int | None = None,
+) -> Any:
+    if not isinstance(value, torch.Tensor):
+        return value
+
+    target_shape = _get_visual_tensor_shape(feature, num_frames=num_frames)
+    if tuple(value.shape) == target_shape:
+        return value
+
+    if len(target_shape) == 3 and value.ndim == 3:
+        channels, height, width = target_shape
+        if tuple(value.shape) == (height, width, channels):
+            return value.permute(2, 0, 1).contiguous()
+
+    if len(target_shape) == 4 and value.ndim == 4:
+        frames, channels, height, width = target_shape
+        if tuple(value.shape) == (frames, height, width, channels):
+            return value.permute(0, 3, 1, 2).contiguous()
+
+    return value
 
 
 def _filter_stats(
@@ -82,7 +205,10 @@ def _aggregate_episodes(datasets_list: list[LeRobotDataset]) -> datasets.Dataset
     return datasets.concatenate_datasets(aggregated)
 
 
-def _collect_multi_features(datasets_list: list[LeRobotDataset]) -> dict[str, dict]:
+def _collect_multi_features(
+    datasets_list: list[LeRobotDataset],
+    feature_aliases_by_repo: dict[str, dict[str, str]],
+) -> dict[str, dict]:
     def _feature_signature(feature: dict[str, Any]) -> tuple[Any, tuple[Any, ...], Any]:
         shape = feature.get("shape")
         shape_tuple = tuple(shape) if shape is not None else ()
@@ -92,22 +218,26 @@ def _collect_multi_features(datasets_list: list[LeRobotDataset]) -> dict[str, di
     non_visual_keys: set[str] = set()
 
     for dataset in datasets_list:
+        aliases = feature_aliases_by_repo.get(dataset.repo_id, {})
         for key, feature in dataset.features.items():
-            if key in features:
-                if _feature_signature(features[key]) != _feature_signature(feature):
+            canonical_key = _canonical_feature_key(key, aliases)
+            if canonical_key in features:
+                if _feature_signature(features[canonical_key]) != _feature_signature(feature):
                     raise ValueError(
-                        f"Feature '{key}' has incompatible specs across datasets. "
-                        f"Expected {features[key]}, got {feature} in {dataset.repo_id}."
+                        f"Feature '{canonical_key}' has incompatible specs across datasets. "
+                        f"Expected {features[canonical_key]}, got {feature} in {dataset.repo_id}."
                     )
             else:
-                features[key] = deepcopy(feature)
+                features[canonical_key] = deepcopy(feature)
 
             if not _is_visual_feature(feature):
-                non_visual_keys.add(key)
+                non_visual_keys.add(canonical_key)
 
     missing_non_visual: dict[str, list[str]] = {}
     for dataset in datasets_list:
-        missing = [key for key in non_visual_keys if key not in dataset.features]
+        aliases = feature_aliases_by_repo.get(dataset.repo_id, {})
+        canonical_keys = {_canonical_feature_key(key, aliases) for key in dataset.features}
+        missing = [key for key in non_visual_keys if key not in canonical_keys]
         if missing:
             missing_non_visual[dataset.repo_id] = missing
 
@@ -217,7 +347,9 @@ class MultiLeRobotDatasetMetadata:
                 if delta_timestamps is not None and key in delta_timestamps:
                     num_frames = len(delta_timestamps[key])
                 canonical[key] = (
-                    item[key] if key in item else _make_empty_visual_tensor(feature, num_frames)
+                    _align_visual_tensor_to_feature_shape(item[key], feature, num_frames)
+                    if key in item
+                    else _make_empty_visual_tensor(feature, num_frames)
                 )
                 canonical[missing_mask_key] = (
                     existing_missing
@@ -294,14 +426,21 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 f"All datasets must have the same fps to be concatenated. Expected {first_fps}, got {fps_mismatch}."
             )
 
-        multi_features = _collect_multi_features(self._datasets)
+        self._feature_aliases_by_repo = {
+            dataset.repo_id: _infer_sparky_visual_aliases(dataset.features) for dataset in self._datasets
+        }
+        multi_features = _collect_multi_features(self._datasets, self._feature_aliases_by_repo)
         self.enabled_feature_keys = list(multi_features)
         self.episodes = None
         # TODO(rcadene, aliberts): We should not perform this aggregation for datasets
         # with multiple robots of different ranges. Instead we should have one normalization
         # per robot.
+        canonical_stats = [
+            _canonicalize_stats_keys(dataset.meta.stats, self._feature_aliases_by_repo.get(dataset.repo_id, {}))
+            for dataset in self._datasets
+        ]
         self.stats = _filter_stats(
-            aggregate_stats([dataset.meta.stats for dataset in self._datasets]),
+            aggregate_stats(canonical_stats),
             self.enabled_feature_keys,
         )
         self.meta = MultiLeRobotDatasetMetadata(
@@ -343,13 +482,11 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
         for dataset in self._datasets:
             supported_keys = set(getattr(dataset.meta, "reader_features", dataset.meta.features))
-            child_delta_timestamps = self._delta_timestamps_by_repo.get(dataset.repo_id)
-            if child_delta_timestamps is not None:
-                child_delta_timestamps = {
-                    key: value for key, value in child_delta_timestamps.items() if key in supported_keys
-                }
-                if len(child_delta_timestamps) == 0:
-                    child_delta_timestamps = None
+            child_delta_timestamps = _delta_timestamps_for_reader(
+                self._delta_timestamps_by_repo.get(dataset.repo_id),
+                self._feature_aliases_by_repo.get(dataset.repo_id, {}),
+                supported_keys,
+            )
 
             dataset.delta_timestamps = child_delta_timestamps
             if dataset.reader is not None:
@@ -450,6 +587,8 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         dataset_idx = bisect_right(self._cumulative_sizes, idx)
         start_idx = 0 if dataset_idx == 0 else self._cumulative_sizes[dataset_idx - 1]
         item = self._datasets[dataset_idx][idx - start_idx]
+        repo_id = self.repo_ids[dataset_idx]
+        item = _apply_item_feature_aliases(item, self._feature_aliases_by_repo.get(repo_id, {}))
         task = item.get("task")
         if isinstance(task, str) and self.meta.tasks is not None and "task_index" in item:
             global_task_index = self.meta.tasks.loc[task, "task_index"]
@@ -457,7 +596,6 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 global_task_index = global_task_index.iloc[0]
             item["task_index"] = torch.tensor(int(global_task_index), dtype=torch.int64)
         item["dataset_index"] = torch.tensor(dataset_idx)
-        repo_id = self.repo_ids[dataset_idx]
         delta_timestamps = self._delta_timestamps_by_repo.get(repo_id)
         return self.meta.canonicalize_item(item, delta_timestamps=delta_timestamps)
 

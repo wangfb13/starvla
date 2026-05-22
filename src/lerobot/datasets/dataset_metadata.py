@@ -72,7 +72,7 @@ def _is_visual_feature(feature: dict[str, Any]) -> bool:
 def _get_visual_tensor_shape(feature: dict[str, Any], num_frames: int | None = None) -> tuple[int, ...]:
     shape = tuple(feature["shape"])
     names = feature.get("names")
-    if len(shape) == 3 and names and len(names) == 3:
+    if feature.get("dtype") in {"image", "video"} and len(shape) == 3 and names and len(names) == 3:
         if names[0] not in CHANNEL_NAME_ALIASES and names[-1] in CHANNEL_NAME_ALIASES:
             shape = (shape[2], shape[0], shape[1])
     if num_frames is not None and num_frames > 1:

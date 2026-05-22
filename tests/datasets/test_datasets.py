@@ -517,6 +517,119 @@ def test_multilerobot_dataset_unions_visual_keys_and_adds_missing_masks(
     assert not right_item[f"{cam_right}_is_missing"].item()
 
 
+def test_multilerobot_dataset_canonicalizes_sparky_single_and_dual_visual_keys(
+    tmp_path, empty_lerobot_dataset_factory
+):
+    root = tmp_path / "multi_sparky"
+    repo_ids = ["lerobot/left_hand", "lerobot/right_hand", "lerobot/bimanual"]
+    cam_left = "observation.images.cam_left"
+    cam_right = "observation.images.cam_right"
+    dual_cam_left = "observation.images.left_cam_left"
+    dual_cam_right = "observation.images.right_cam_right"
+    tactile_left_left = "observation.depth_deformation.tactile_left_left"
+    tactile_left_right = "observation.depth_deformation.tactile_left_right"
+    tactile_right_left = "observation.depth_deformation.tactile_right_left"
+    tactile_right_right = "observation.depth_deformation.tactile_right_right"
+    visual_spec = {
+        "dtype": "image",
+        "shape": DUMMY_CHW,
+        "names": ["channels", "height", "width"],
+    }
+
+    def make_features(keys):
+        return {key: dict(visual_spec) for key in keys}
+
+    def make_frame(keys, value):
+        return {key: np.full(DUMMY_CHW, value, dtype=np.float32) for key in keys} | {"task": "Dummy task"}
+
+    left_keys = [cam_left, tactile_left_left, tactile_right_left]
+    left_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[0], repo_id=repo_ids[0], features=make_features(left_keys), use_videos=False
+    )
+    left_dataset.add_frame(make_frame(left_keys, 1.0))
+    left_dataset.save_episode()
+
+    right_source_keys = [cam_right, tactile_left_left, tactile_right_left]
+    right_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[1],
+        repo_id=repo_ids[1],
+        features=make_features(right_source_keys),
+        use_videos=False,
+    )
+    right_dataset.add_frame(make_frame(right_source_keys, 2.0))
+    right_dataset.save_episode()
+
+    dual_source_keys = [
+        dual_cam_left,
+        dual_cam_right,
+        tactile_left_left,
+        tactile_left_right,
+        tactile_right_left,
+        tactile_right_right,
+    ]
+    dual_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[2],
+        repo_id=repo_ids[2],
+        features=make_features(dual_source_keys),
+        use_videos=False,
+    )
+    dual_dataset.add_frame(make_frame(dual_source_keys, 3.0))
+    dual_dataset.save_episode()
+
+    dataset = MultiLeRobotDataset(repo_ids, root=root, download_videos=False)
+    canonical_visual_keys = {
+        cam_left,
+        cam_right,
+        tactile_left_left,
+        tactile_left_right,
+        tactile_right_left,
+        tactile_right_right,
+    }
+
+    assert canonical_visual_keys.issubset(dataset.meta.features)
+    assert dual_cam_left not in dataset.meta.features
+    assert dual_cam_right not in dataset.meta.features
+
+    left_item = dataset[0]
+    assert not left_item[f"{cam_left}_is_missing"].item()
+    assert left_item[f"{cam_right}_is_missing"].item()
+    assert not left_item[f"{tactile_left_left}_is_missing"].item()
+    assert left_item[f"{tactile_left_right}_is_missing"].item()
+    assert not left_item[f"{tactile_right_left}_is_missing"].item()
+    assert left_item[f"{tactile_right_right}_is_missing"].item()
+
+    right_item = dataset[1]
+    assert right_item[f"{cam_left}_is_missing"].item()
+    assert not right_item[f"{cam_right}_is_missing"].item()
+    assert right_item[f"{tactile_left_left}_is_missing"].item()
+    assert not right_item[f"{tactile_left_right}_is_missing"].item()
+    assert right_item[f"{tactile_right_left}_is_missing"].item()
+    assert not right_item[f"{tactile_right_right}_is_missing"].item()
+    assert torch.allclose(right_item[tactile_left_right], torch.full(DUMMY_CHW, 2.0))
+    assert torch.allclose(right_item[tactile_right_right], torch.full(DUMMY_CHW, 2.0))
+
+    dual_item = dataset[2]
+    for key in canonical_visual_keys:
+        assert not dual_item[f"{key}_is_missing"].item()
+
+    delta_timestamps = {
+        cam_left: [0.0],
+        cam_right: [0.0],
+        tactile_left_right: [0.0],
+        tactile_right_right: [0.0],
+    }
+    dataset.set_delta_timestamps(delta_timestamps)
+
+    assert dual_cam_left in dataset._datasets[2].delta_timestamps
+    assert dual_cam_right in dataset._datasets[2].delta_timestamps
+    assert cam_left not in dataset._datasets[2].delta_timestamps
+    assert cam_right not in dataset._datasets[2].delta_timestamps
+    assert tactile_left_left in dataset._datasets[1].delta_timestamps
+    assert tactile_right_left in dataset._datasets[1].delta_timestamps
+    assert tactile_left_right not in dataset._datasets[1].delta_timestamps
+    assert tactile_right_right not in dataset._datasets[1].delta_timestamps
+
+
 def test_info_override_can_add_missing_visual_history_shape(tmp_path, empty_lerobot_dataset_factory):
     repo_id = "lerobot/left_schema"
     root = tmp_path / "info_override"

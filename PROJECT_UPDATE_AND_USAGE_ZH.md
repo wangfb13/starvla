@@ -389,3 +389,93 @@ src/lerobot/scripts/lerobot_train.py \
     sh create_dataset_symlinks_from_txt.sh groupA_roots.txt /mnt/cpfs/datasets/pi05_groupA_train_roots_symlink
   - 训练时指定新创建的软链接目录，如--dataset.root=/mnt/cpfs/datasets/pi05_groupA_train_roots_symlink
 
+## 16. UMI数据坐标对齐与action_gap_frames功能
+
+### 16.1 为什么需要先做坐标对齐
+
+UMI 数据中的 `observation.state` 和 `action` 都是在设备开机后由 VSLAM 建图得到的世界坐标系下记录的。由于每次开机或每个回合建立的世界坐标系可能不同，不同轨迹之间的坐标原点和朝向不一定一致。如果直接混在一起训练，模型会看到多套不同的世界坐标系，学习难度会明显增加。
+
+这里需要特别注意位置和姿态的含义不完全一样。位置 `x/y/z` 可以比较直观地以第一帧作为零点，让每条轨迹都从 `(0, 0, 0)` 附近开始；但姿态中的 `roll/pitch` 不能简单理解为也应该从 0 开始。UMI 的 `roll/pitch` 是根据设备初始姿态和重力方向计算出来的，它们反映的是手持设备相对重力的倾斜状态。如果视频开始时设备本身就是倾斜的，比如手持时已经倾斜了 30 度，那么 `pose_data.csv` 第一帧里对应的角度也会接近 30 度，而不是 0 度。
+
+因此，坐标对齐时更准确的理解是：对每条轨迹建立一个以第一帧为参考的局部坐标系。位置可以从第一帧归零；姿态则需要根据第一帧姿态做相对变换，保留和重力对齐后的物理含义，避免把设备初始倾斜误当成模型应该学习的任务差异。处理后，每条轨迹都变成“从第一帧出发的局部绝对轨迹”，不同回合之间就可以放到统一口径下训练。
+
+这种处理不会限制后续训练方式。后续既可以直接使用“以第一帧为零点的局部绝对坐标”，也可以在此基础上继续构造相对动作、gap frame 动作或其他坐标表示，具体方式根据任务需求选择。
+
+### 16.2 action_gap_frames的作用
+
+`action_gap_frames` 用来控制“用当前帧状态/图像预测未来第几帧开始的 action”。例如 `action_gap_frames=6` 且 `chunk_size=50` 时，当前样本对应的 action chunk 会从当前帧之后第 6 帧开始取，范围相当于 `[t+6, t+7, ..., t+55]`。
+
+这个功能主要用于处理 observation 和 action 之间的时间对齐问题。对于 UMI 数据，`state` 和 `action` 往往来自同一时刻的轨迹记录，并不天然包含机器人“下发动作到执行完成”的延时；如果希望模型从当前观测预测稍后会执行到的位置，就可以通过 `action_gap_frames` 把监督信号往未来移动。对于真机 LeRobot 采集数据，是否需要 gap 取决于数据转换口径和任务控制延时，不能简单照搬 UMI 的设置。
+
+### 16.3 训练配置建议
+
+  - 单一 gap 设置：使用 `--policy.action_gap_frames=<gap>`。
+  - 多数据集混训且不同数据源需要不同 gap：使用 `--policy.action_gap_dataset_overrides=<dataset_index>:<gap>`。
+  - 如果为了对齐 UMI 数据，需要用当前真实末端位姿生成 action，建议在数据预处理阶段显式生成和 `state` 同口径的 `action`，再由 `action_gap_frames` 决定训练时取未来多少帧作为监督。
+  - 修改 gap 后需要重新确认 `delta_timestamps`、`chunk_size` 和离线评估脚本是否使用同一套配置，避免训练和评估取到不同帧。
+
+## 17. UMI train_ready单手和双手任务key值不统一问题解决
+
+### 17.1 问题背景
+
+UMI train_ready 数据里，左手单臂、右手单臂、双手任务的视觉和触觉 key 并不完全一致。典型问题包括：双手数据的鱼眼相机叫 `observation.images.left_cam_left` / `observation.images.right_cam_right`，而单手数据使用 `observation.images.cam_left` / `observation.images.cam_right`；右手单臂数据中的触觉 key 仍然使用了类似左手单臂的名字，如果直接混训，模型可能把右手触觉误认为左手触觉。
+
+### 17.2 统一后的canonical key
+
+混训时统一暴露下面 6 个视觉/触觉 key：
+
+```text
+observation.images.cam_left
+observation.images.cam_right
+observation.depth_deformation.tactile_left_left
+observation.depth_deformation.tactile_left_right
+observation.depth_deformation.tactile_right_left
+observation.depth_deformation.tactile_right_right
+```
+
+具体映射规则：
+
+  - 双手相机 `observation.images.left_cam_left` 会映射为 `observation.images.cam_left`。
+  - 双手相机 `observation.images.right_cam_right` 会映射为 `observation.images.cam_right`。
+  - 右手单臂触觉旧 key 会重命名到右手 canonical key，不再复制保留旧 key，避免同一份右手触觉同时被当成左手触觉。
+  - 左手单臂缺失右相机/右触觉时，会补空 tensor，并通过 `*_is_missing=True` 标记。
+  - 右手单臂缺失左相机/左触觉时，会补空 tensor，并通过 `*_is_missing=True` 标记。
+  - 双手数据 6 路 key 都应为 `*_is_missing=False`。
+
+### 17.3 读取逻辑上的关键约束
+
+不要直接修改原始数据集文件，也不要要求所有子数据集在磁盘上提前改成统一 key。正确逻辑是：每个子数据集仍然按照它自己原始的 `info.json` / `reader_features` 去读取数据；只有在 item 已经从子数据集读出来之后，`MultiLeRobotDataset` 才把 key 映射成统一 canonical key。
+
+`delta_timestamps` 也遵循同样原则：训练配置侧可以使用统一 canonical key，但传给每个子 reader 时会反向映射回该子数据集真实存在的原始 key。例如双手数据读取时仍使用 `left_cam_left/right_cam_right`，右手单臂读取时仍使用它原始的触觉 key。
+
+### 17.4 当前验证结果
+
+已使用实际数据 `/mnt/cpfs/datasets/pi05_groupA_train_roots_symlink` 验证：
+
+```text
+repo_count: 15
+total_frames: 1993863
+total_episodes: 2332
+```
+
+抽样验证结果：
+
+```text
+左手单臂: cam_left=False, cam_right=True,  left tactile=False, right tactile=True
+双手任务: cam_left=False, cam_right=False, left tactile=False, right tactile=False
+右手单臂: cam_left=True,  cam_right=False, left tactile=True,  right tactile=False
+```
+
+其中 `False` 表示该模态真实存在，`True` 表示该模态缺失并由空 tensor 填充。三类样本已验证可以正常 batch collate：
+
+```text
+observation.images.cam_left batch_shape=(3, 3, 224, 224)
+observation.images.cam_right batch_shape=(3, 3, 224, 224)
+all tactile batch_shape=(3, 3, 96, 128)
+```
+
+相关代码位置：
+
+  - key 统一逻辑：`src/lerobot/datasets/multi_dataset.py`
+  - 空视觉/触觉 tensor shape 逻辑：`src/lerobot/datasets/dataset_metadata.py`
+  - 单元测试：`tests/datasets/test_datasets.py`
