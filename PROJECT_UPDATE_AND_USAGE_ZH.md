@@ -136,7 +136,7 @@
 - `canonical_bimanual.py`
 - `README.md`
 
-这次改动的目的不是立刻把 `vtla_share` 里的完整 language/subtask 分支迁进来，而是先在当前工程里预留一个可独立演进的 `pi05_full` 策略入口，避免后续继续直接改 `pi05` 本体。
+这次改动的初衷是先在当前工程里预留一个可独立演进的 `pi05_full` 策略入口，避免后续继续直接改 `pi05` 本体。当前在这个基础上，已经额外迁入了 `vtla_share` 里与 `user_prompt / subtask` 相关的“数据读取、prompt 组织、token 化、模型取 language token”这条最小可用链路。
 
 当前已经完成的接线包括：
 
@@ -156,11 +156,61 @@
 
 来实例化这个新策略。
 
-需要特别注意，当前这个 `pi05_full` 还是“独立目录版的当前 `pi05`”，也就是：
+当前这个 `pi05_full` 不再只是“纯复制版的当前 `pi05`”，而是已经比 `pi05` 多了一层 `user_prompt / subtask` 处理能力。具体新增行为如下：
 
-- 目前功能上仍然等价于当前工程里的 `pi05`
-- 还没有迁入 `vtla_share` 里的 `user_prompt / subtask / language decoder` 那套完整逻辑
-- 目前只是先把工程结构和策略入口准备好，方便后续继续做真正的 `pi05_full` 扩展
+- `TokenizerProcessorStep` 已支持读取 `complementary_data.user_prompt`
+- `TokenizerProcessorStep` 已支持读取 `complementary_data.subtask`
+- `subtask` token 化后会自动补 `EOS token`
+- `pi05_full` 的预处理会优先读取 `user_prompt`
+- 如果没有 `user_prompt`，会自动 fallback 到 `task`
+- `pi05_full` 的预处理会优先读取 `next_subtask`
+- 如果没有 `next_subtask`，会依次 fallback 到：`subtask`、`next_subtask_text_sidecar`、`subtask_text_sidecar`
+- 如果以上字段都没有，并且开启默认 fallback，会退化为使用 `user_prompt / task` 本身生成 `subtask`
+- 单样本推理路径下，`AddBatchDimensionComplementaryDataStep` 也已补充支持：`user_prompt`、`subtask`、`next_subtask`、`next_subtask_text_sidecar`、`subtask_text_sidecar`
+
+模型侧当前也做了一个很重要的接线：
+
+- `pi05_full` 在训练和推理时，会优先使用 `observation.user_prompt.tokens`
+- 如果没有 `user_prompt tokens`，则自动回退到原来的 `observation.language.tokens`
+- `pi05_full` 训练时已经会把 `observation.subtask.tokens` 接入 prefix
+- `subtask` token 在 prefix 中采用“可看上下文、对子任务自身保持 causal”的 attention 方式
+- `pi05_full` 当前已经支持 `subtask` 的辅助交叉熵训练 loss
+- `pi05_full` 推理时已经支持显式自回归生成下一个 `subtask`
+- 总训练 loss 现在由：
+  - 动作 flow loss
+  - `loss_weight_subtask_ce * subtask_ce_loss`
+ 共同组成
+
+这意味着：
+
+- `user_prompt` 现在已经会真实影响 `pi05_full` 的训练输入
+- 不再只是“把字段读出来但模型没用”
+- `subtask` 现在也已经不只是“被 token 化存起来”
+- 它已经会真实参与训练反向传播
+- `pi05_full` 在推理时，如果没有可用的显式 `subtask`，已经会先生成 `subtask` 再采样动作
+
+但也要明确当前边界：
+
+- 这次已经迁入了 `subtask prediction loss` 和“推理时显式自回归生成下一个 `subtask`”这两部分
+- 但还没有把 `vtla_share` 那套完整的 FAST action token 支路一起迁入
+- 当前 `subtask` loss 是作为 `pi05_full` 的辅助训练目标存在
+- 目前新增的推理生成逻辑只挂在 `pi05_full` 上，不会影响当前仓库里的其他 policy
+
+当前 `pi05_full` 推理期关于 `subtask` 的优先级和缓存规则如下：
+
+- 如果 batch 中提供了显式 `subtask tokens`，并且 `pi05_full.subtask_is_fallback=false`，则直接使用这份显式 `subtask`
+- 如果没有显式 `subtask`，或者该 `subtask` 只是由 `task/user_prompt` fallback 出来的占位文本，则会触发自回归生成
+- 生成结果会缓存在 policy 内部
+- 当 `user_prompt/task` 发生变化时，缓存会自动失效并重新生成
+- 当调用 `policy.reset()` 时，缓存会被清空
+- 当距离上一次生成的时间超过 `--policy.subtask_regeneration_interval` 时，会重新生成
+- 如果把 `--policy.subtask_regeneration_interval=0`，则表示每次推理都重新生成
+
+当前与这部分推理行为直接相关的新配置项有：
+
+- `--policy.max_decoding_steps`
+- `--policy.temperature`
+- `--policy.subtask_regeneration_interval`
 
 另外，这次复制目录后还处理了一个很关键的注册冲突问题。由于 `pi05` 和 `pi05_full` 都会向 `ProcessorStepRegistry` 注册 processor step，如果继续沿用原来的 step 名称，导入时会因为重名而直接报错。因此 `pi05_full` 路径下的 step 注册名已经单独改为：
 
@@ -170,26 +220,44 @@
 
 同时，`factory.py` 中加载 pretrained processor 的 override key 也已同步切换到这组 `pi05_full_*` 名字，避免和原 `pi05` 互相覆盖。
 
-当前还补了一个最小测试：
+当前测试也已经从最小注册测试扩展为覆盖 `pi05_full user_prompt/subtask` 逻辑的回归测试：
 
 - `tests/policies/pi0_pi05/test_pi05_full.py`
 
-它主要用于检查：
+当前覆盖点包括：
 
 - `make_policy_config("pi05_full")`
 - `get_policy_class("pi05_full")`
+- `user_prompt` 优先级
+- `subtask` 多级 fallback
+- `subtask fallback` 标记透传
+- `subtask` token 的 `EOS` 补齐
+- `subtask` prefix attention 的 causal 约束
+- `subtask` loss 与总训练 loss 的聚合
+- `pi05_full` 模型优先使用 `user_prompt tokens`
+- `make_pi05_full_pre_post_processors(...)` 在 `use_state_input=false` 下对新字段的兼容性
+- `reset()` 清理 subtask cache
+- 显式 `subtask` 优先于推理生成
+- fallback `subtask` 触发推理生成
+- `subtask_regeneration_interval` 控制缓存复用
 
 在本机上，已使用环境：
 
 - `/root/miniconda3/envs/lerobot_v0.5.1`
 
-做过轻量验证，确认：
+做过实际回归验证，确认：
 
 - `make_policy_config("pi05_full")` 返回 `PI05FullConfig`
 - `cfg.type == "pi05_full"`
 - `get_policy_class("pi05_full")` 返回 `PI05FullPolicy`
+- `user_prompt / subtask` 预处理逻辑工作正常
+- `pi05_full` 会优先消费 `user_prompt tokens`
+- `subtask` 已参与训练 loss 计算
+- `pi05_full` 推理时会在需要时自回归生成 `subtask`
+- 显式 `subtask` 与 fallback `subtask` 的推理分流逻辑工作正常
+- `subtask` 推理缓存与 interval 刷新逻辑工作正常
 
-不过该环境当前没有安装 `pytest`，因此本次只完成了注册/导入级别验证，没有在本机完成完整 pytest 执行。
+不过该环境当前没有安装 `pytest`，因此本次没有直接执行 `pytest` 命令，而是使用同一环境下的 Python 直接调用测试函数，已实际跑通 `17` 个回归测试。
 
 ## 3. 当前推荐训练配置
 

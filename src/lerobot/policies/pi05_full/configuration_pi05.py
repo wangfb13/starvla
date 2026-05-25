@@ -87,6 +87,9 @@ class PI05FullConfig(PreTrainedConfig):
 
     tokenizer_name: str = "google/paligemma-3b-pt-224"
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
+    max_decoding_steps: int = 200
+    temperature: float = 0.0
+    subtask_regeneration_interval: float = 1.0
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -105,6 +108,7 @@ class PI05FullConfig(PreTrainedConfig):
     # Finetuning settings
     freeze_vision_encoder: bool = False  # Freeze only the vision encoder
     train_expert_only: bool = False  # Freeze entire VLM, train only action expert and projections
+    loss_weight_subtask_ce: float = 1.0
 
     # Optimizer settings: see openpi `AdamW`
     optimizer_lr: float = 2.5e-5  # see openpi `CosineDecaySchedule: peak_lr`
@@ -150,6 +154,15 @@ class PI05FullConfig(PreTrainedConfig):
 
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
+
+        if self.loss_weight_subtask_ce < 0:
+            raise ValueError("loss_weight_subtask_ce must be non-negative.")
+        if self.max_decoding_steps <= 0:
+            raise ValueError("max_decoding_steps must be positive.")
+        if self.temperature < 0:
+            raise ValueError("temperature must be non-negative.")
+        if self.subtask_regeneration_interval < 0:
+            raise ValueError("subtask_regeneration_interval must be non-negative.")
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""

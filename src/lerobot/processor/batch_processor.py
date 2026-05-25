@@ -147,6 +147,15 @@ class AddBatchDimensionComplementaryDataStep(ComplementaryDataProcessorStep):
     - 'index' and 'task_index' (0D tensors) get a batch dimension.
     """
 
+    string_batch_keys: tuple[str, ...] = (
+        "task",
+        "user_prompt",
+        "subtask",
+        "next_subtask",
+        "next_subtask_text_sidecar",
+        "subtask_text_sidecar",
+    )
+
     def complementary_data(self, complementary_data: dict) -> dict:
         """
         Adds a batch dimension to specific fields in the complementary data dictionary.
@@ -157,11 +166,9 @@ class AddBatchDimensionComplementaryDataStep(ComplementaryDataProcessorStep):
         Returns:
             The complementary data dictionary with batch dimensions added.
         """
-        # Process task field - wrap string in list to add batch dimension
-        if "task" in complementary_data:
-            task_value = complementary_data["task"]
-            if isinstance(task_value, str):
-                complementary_data["task"] = [task_value]
+        for key in self.string_batch_keys:
+            if key in complementary_data and isinstance(complementary_data[key], str):
+                complementary_data[key] = [complementary_data[key]]
 
         # Process index field - add batch dim if 0D
         if "index" in complementary_data:

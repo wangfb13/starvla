@@ -42,7 +42,11 @@ from lerobot.processor import (
     TokenizerProcessorStep,
     UnnormalizerProcessorStep,
 )
-from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
+from lerobot.processor.converters import (
+    batch_to_transition,
+    policy_action_to_transition,
+    transition_to_policy_action,
+)
 from lerobot.types import EnvTransition, TransitionKey
 from lerobot.utils.constants import (
     ACTION,
@@ -52,6 +56,25 @@ from lerobot.utils.constants import (
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
+
+PI05_FULL_SUBTASK_IS_FALLBACK_KEY = "pi05_full.subtask_is_fallback"
+
+
+def pi05_full_batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
+    """Preserve pi05_full-specific complementary fields that the generic batch converter drops."""
+    transition = batch_to_transition(batch)
+    complementary_data = dict(transition.get(TransitionKey.COMPLEMENTARY_DATA, {}) or {})
+    for key in (
+        "user_prompt",
+        "next_subtask",
+        "next_subtask_text_sidecar",
+        "subtask_text_sidecar",
+        PI05_FULL_SUBTASK_IS_FALLBACK_KEY,
+    ):
+        if key in batch:
+            complementary_data[key] = batch[key]
+    transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+    return transition
 
 
 @ProcessorStepRegistry.register(name="pi05_full_canonicalize_bimanual_rot6d")
@@ -159,14 +182,61 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
     max_state_dim: int = 32
     task_key: str = "task"
     use_state_input: bool = True
+    user_prompt_key: str = "user_prompt"
+    command_key: str = "next_subtask"
+    fallback_command_to_task: bool = True
+    command_fallback_keys: tuple[str, ...] = ("subtask", "next_subtask_text_sidecar", "subtask_text_sidecar")
+
+    @staticmethod
+    def _to_text_batch(value: Any, key: str) -> list[str]:
+        if value is None:
+            raise ValueError(f"No {key} found in complementary data")
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return value
+        raise ValueError(f"Complementary data '{key}' must be a string or list[str], got {type(value)!r}")
+
+    @staticmethod
+    def _clean_text(value: str) -> str:
+        return value.strip().replace("_", " ").replace("\n", " ")
+
+    @classmethod
+    def _optional_text_batch(cls, value: Any, key: str) -> list[str] | None:
+        if value is None:
+            return None
+        texts = cls._to_text_batch(value, key)
+        if not any(cls._clean_text(text) for text in texts):
+            return None
+        return texts
+
+    @classmethod
+    def _format_action_prompt(cls, value: str, state_str: str | None) -> str:
+        cleaned_text = cls._clean_text(value)
+        if state_str is None:
+            return f"Task: {cleaned_text}\nAction: "
+        return f"Task: {cleaned_text}, State: {state_str};\nAction: "
+
+    @classmethod
+    def _format_subtask_prompt(cls, value: str) -> str:
+        return f"Subtask: {cls._clean_text(value)};\n"
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         transition = transition.copy()
 
         state = transition.get(TransitionKey.OBSERVATION, {}).get(OBS_STATE)
-        tasks = transition.get(TransitionKey.COMPLEMENTARY_DATA, {}).get(self.task_key)
-        if tasks is None:
-            raise ValueError("No task found in complementary data")
+        complementary_data = dict(transition.get(TransitionKey.COMPLEMENTARY_DATA, {}) or {})
+        transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+
+        tasks = self._optional_text_batch(complementary_data.get(self.task_key), self.task_key)
+        user_prompts = self._optional_text_batch(complementary_data.get(self.user_prompt_key), self.user_prompt_key)
+        if tasks is None and user_prompts is None:
+            raise ValueError("No task or user_prompt found in complementary data")
+
+        task_texts = tasks if tasks is not None else user_prompts
+        user_prompt_texts = user_prompts if user_prompts is not None else tasks
+        assert task_texts is not None
+        assert user_prompt_texts is not None
 
         discretized_states = None
         if self.use_state_input:
@@ -181,19 +251,47 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
             state_np = state.cpu().numpy()
             discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
 
-        full_prompts = []
-        for i, task in enumerate(tasks):
-            cleaned_text = task.strip().replace("_", " ").replace("\n", " ")
-            if discretized_states is None:
-                full_prompt = f"Task: {cleaned_text}\nAction: "
-            else:
-                state_str = " ".join(map(str, discretized_states[i]))
-                full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
-            full_prompts.append(full_prompt)
+        if len(task_texts) != len(user_prompt_texts):
+            raise ValueError("task and user_prompt must have the same batch size after preprocessing")
 
-        transition[TransitionKey.COMPLEMENTARY_DATA][self.task_key] = full_prompts
-        # Normalize state to [-1, 1] range if needed (assuming it's already normalized by normalizer processor step!!)
-        # Discretize into 256 bins (see openpi `PaligemmaTokenizer.tokenize()`)
+        def make_prompt_batch(texts: list[str]) -> list[str]:
+            full_prompts: list[str] = []
+            for i, text in enumerate(texts):
+                state_str = None
+                if discretized_states is not None:
+                    state_str = " ".join(map(str, discretized_states[i]))
+                full_prompts.append(self._format_action_prompt(text, state_str))
+            return full_prompts
+
+        complementary_data[self.task_key] = make_prompt_batch(task_texts)
+        complementary_data[self.user_prompt_key] = make_prompt_batch(user_prompt_texts)
+
+        commands = self._optional_text_batch(complementary_data.get(self.command_key), self.command_key)
+        resolved_command_key = self.command_key if commands is not None else None
+        if commands is None:
+            for fallback_key in self.command_fallback_keys:
+                commands = self._optional_text_batch(complementary_data.get(fallback_key), fallback_key)
+                if commands is not None:
+                    resolved_command_key = fallback_key
+                    break
+        used_task_fallback = False
+        if commands is None and self.fallback_command_to_task:
+            commands = user_prompt_texts
+            used_task_fallback = True
+        if commands is not None:
+            if len(commands) != len(user_prompt_texts):
+                raise ValueError("subtask/user_prompt batch size mismatch")
+            formatted_commands = [self._format_subtask_prompt(text) for text in commands]
+            complementary_data[self.command_key] = formatted_commands
+            complementary_data["subtask"] = formatted_commands
+            marker_device = state.device if isinstance(state, torch.Tensor) else None
+            complementary_data[PI05_FULL_SUBTASK_IS_FALLBACK_KEY] = torch.full(
+                (len(user_prompt_texts),),
+                used_task_fallback,
+                dtype=torch.bool,
+                device=marker_device,
+            )
+
         return transition
 
     def get_config(self) -> dict[str, Any]:
@@ -201,6 +299,10 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
             "max_state_dim": self.max_state_dim,
             "task_key": self.task_key,
             "use_state_input": self.use_state_input,
+            "user_prompt_key": self.user_prompt_key,
+            "command_key": self.command_key,
+            "fallback_command_to_task": self.fallback_command_to_task,
+            "command_fallback_keys": list(self.command_fallback_keys),
         }
 
     def transform_features(
@@ -306,6 +408,7 @@ def make_pi05_full_pre_post_processors(
         PolicyProcessorPipeline[dict[str, Any], dict[str, Any]](
             steps=input_steps,
             name=POLICY_PREPROCESSOR_DEFAULT_NAME,
+            to_transition=pi05_full_batch_to_transition,
         ),
         PolicyProcessorPipeline[PolicyAction, PolicyAction](
             steps=output_steps,
