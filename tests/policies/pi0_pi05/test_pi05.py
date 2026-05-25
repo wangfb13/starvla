@@ -16,6 +16,8 @@
 
 """Test script to verify PI0.5 (pi05) support in PI0 policy"""
 
+import copy
+
 import pytest
 import torch
 
@@ -28,7 +30,116 @@ from lerobot.policies.pi05 import (  # noqa: E402
     make_pi05_pre_post_processors,  # noqa: E402
 )
 from lerobot.utils.random_utils import set_seed
+from lerobot.utils.constants import OBS_LANGUAGE_TOKENS
 from tests.utils import require_cuda, require_hf_token  # noqa: E402
+
+
+def _make_test_config(use_state_input: bool = True) -> PI05Config:
+    from lerobot.configs.types import FeatureType, PolicyFeature
+
+    config = PI05Config(max_action_dim=7, max_state_dim=14, dtype="float32", use_state_input=use_state_input)
+    config.input_features = {
+        "observation.images.base_0_rgb": PolicyFeature(
+            type=FeatureType.VISUAL,
+            shape=(3, 224, 224),
+        ),
+    }
+    if config.requires_state_feature:
+        config.input_features["observation.state"] = PolicyFeature(
+            type=FeatureType.STATE,
+            shape=(14,),
+        )
+    config.output_features = {
+        "action": PolicyFeature(
+            type=FeatureType.ACTION,
+            shape=(7,),
+        ),
+    }
+    return config
+
+
+def _make_dataset_stats(include_state: bool = True) -> dict[str, dict[str, torch.Tensor]]:
+    stats = {
+        "action": {
+            "mean": torch.zeros(7),
+            "std": torch.ones(7),
+            "min": torch.zeros(7),
+            "max": torch.ones(7),
+            "q01": torch.zeros(7),
+            "q99": torch.ones(7),
+        },
+        "observation.images.base_0_rgb": {
+            "mean": torch.zeros(3, 224, 224),
+            "std": torch.ones(3, 224, 224),
+            "q01": torch.zeros(3, 224, 224),
+            "q99": torch.ones(3, 224, 224),
+        },
+    }
+    if include_state:
+        stats["observation.state"] = {
+            "mean": torch.zeros(14),
+            "std": torch.ones(14),
+            "min": torch.zeros(14),
+            "max": torch.ones(14),
+            "q01": torch.zeros(14),
+            "q99": torch.ones(14),
+        }
+    return stats
+
+
+def _token_ids_to_text(batch: dict[str, torch.Tensor], tokenizer_name: str) -> str:
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    return tokenizer.decode(batch[OBS_LANGUAGE_TOKENS][0], skip_special_tokens=True)
+
+
+def test_pi05_preprocessor_includes_state_in_prompt_by_default():
+    config = _make_test_config(use_state_input=True)
+    preprocessor, _ = make_pi05_pre_post_processors(config=config, dataset_stats=_make_dataset_stats())
+
+    batch = {
+        "observation.state": torch.linspace(-1.0, 1.0, 14).unsqueeze(0),
+        "observation.images.base_0_rgb": torch.rand(1, 3, 224, 224),
+        "task": ["Pick up the object"],
+    }
+
+    processed = preprocessor(copy.deepcopy(batch))
+    prompt_text = _token_ids_to_text(processed, config.tokenizer_name)
+
+    assert "Task:" in prompt_text
+    assert "State:" in prompt_text
+    assert "Action:" in prompt_text
+
+
+def test_pi05_preprocessor_can_skip_state_prompt_and_state_feature():
+    config = _make_test_config(use_state_input=False)
+    assert "observation.state" not in config.input_features
+
+    preprocessor, _ = make_pi05_pre_post_processors(
+        config=config,
+        dataset_stats=_make_dataset_stats(include_state=False),
+    )
+
+    batch = {
+        "observation.images.base_0_rgb": torch.rand(1, 3, 224, 224),
+        "task": ["Pick up the object"],
+    }
+
+    processed = preprocessor(copy.deepcopy(batch))
+    prompt_text = _token_ids_to_text(processed, config.tokenizer_name)
+
+    assert "Task:" in prompt_text
+    assert "State:" not in prompt_text
+    assert "Action:" in prompt_text
+
+
+def test_pi05_relative_actions_still_require_state_feature():
+    config = _make_test_config(use_state_input=False)
+    config.use_relative_actions = True
+    config.validate_features()
+
+    assert "observation.state" in config.input_features
 
 
 @require_cuda

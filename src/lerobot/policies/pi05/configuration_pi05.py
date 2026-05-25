@@ -42,6 +42,10 @@ class PI05Config(PreTrainedConfig):
     # Shorter state and action vectors will be padded to these dimensions
     max_state_dim: int = 32
     max_action_dim: int = 32
+    # Whether to include observation.state in PI0.5 inputs.
+    # When enabled, state is discretized and appended to the language prompt.
+    # When disabled, PI0.5 uses a task-only prompt.
+    use_state_input: bool = True
 
     # Flow matching parameters: see openpi `PI0Pytorch`
     num_inference_steps: int = 10
@@ -157,7 +161,7 @@ class PI05Config(PreTrainedConfig):
             )
             self.input_features[key] = empty_camera
 
-        if OBS_STATE not in self.input_features:
+        if self.requires_state_feature and OBS_STATE not in self.input_features:
             state_feature = PolicyFeature(
                 type=FeatureType.STATE,
                 shape=((self.canonical_state_dim,) if self.canonicalize_bimanual_rot6d else (self.max_state_dim,)),
@@ -191,6 +195,10 @@ class PI05Config(PreTrainedConfig):
     @property
     def observation_delta_indices(self) -> None:
         return None
+
+    @property
+    def requires_state_feature(self) -> bool:
+        return self.use_state_input or self.use_relative_actions or self.canonicalize_bimanual_rot6d
 
     @property
     def action_delta_indices(self) -> list:

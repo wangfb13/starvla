@@ -158,36 +158,50 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
 
     max_state_dim: int = 32
     task_key: str = "task"
+    use_state_input: bool = True
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         transition = transition.copy()
 
         state = transition.get(TransitionKey.OBSERVATION, {}).get(OBS_STATE)
-        if state is None:
-            raise ValueError("State is required for PI05")
         tasks = transition.get(TransitionKey.COMPLEMENTARY_DATA, {}).get(self.task_key)
         if tasks is None:
             raise ValueError("No task found in complementary data")
 
-        # TODO: check if this necessary
-        state = deepcopy(state)
+        discretized_states = None
+        if self.use_state_input:
+            if state is None:
+                raise ValueError("State is required for PI05 when use_state_input=True")
 
-        # State should already be normalized to [-1, 1] by the NormalizerProcessorStep that runs before this step
-        # Discretize into 256 bins (see openpi `PaligemmaTokenizer.tokenize()`)
-        state_np = state.cpu().numpy()
-        discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            # TODO: check if this necessary
+            state = deepcopy(state)
+
+            # State should already be normalized to [-1, 1] by the NormalizerProcessorStep that runs before this step
+            # Discretize into 256 bins (see openpi `PaligemmaTokenizer.tokenize()`)
+            state_np = state.cpu().numpy()
+            discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
 
         full_prompts = []
         for i, task in enumerate(tasks):
             cleaned_text = task.strip().replace("_", " ").replace("\n", " ")
-            state_str = " ".join(map(str, discretized_states[i]))
-            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+            if discretized_states is None:
+                full_prompt = f"Task: {cleaned_text}\nAction: "
+            else:
+                state_str = " ".join(map(str, discretized_states[i]))
+                full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
             full_prompts.append(full_prompt)
 
         transition[TransitionKey.COMPLEMENTARY_DATA][self.task_key] = full_prompts
         # Normalize state to [-1, 1] range if needed (assuming it's already normalized by normalizer processor step!!)
         # Discretize into 256 bins (see openpi `PaligemmaTokenizer.tokenize()`)
         return transition
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "max_state_dim": self.max_state_dim,
+            "task_key": self.task_key,
+            "use_state_input": self.use_state_input,
+        }
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -266,7 +280,10 @@ def make_pi05_pre_post_processors(
                 action_mask_observation_key=config.action_mask_observation_key,
                 state_mask_observation_key=config.state_mask_observation_key,
             ),
-            Pi05PrepareStateTokenizerProcessorStep(max_state_dim=config.max_state_dim),
+            Pi05PrepareStateTokenizerProcessorStep(
+                max_state_dim=config.max_state_dim,
+                use_state_input=config.use_state_input,
+            ),
             TokenizerProcessorStep(
                 tokenizer_name=config.tokenizer_name,
                 max_length=config.tokenizer_max_length,

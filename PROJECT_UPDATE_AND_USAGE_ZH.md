@@ -76,6 +76,52 @@
 
 这是刻意设计，不是偶然结果。原因是当前 relative processor 只支持逐维 `action - state`，这适合位置，不适合 `rot6d` 这种旋转流形表示。
 
+### 2.4 PI05 的 state 输入现已可配置
+
+当前工程为 `pi05 / pi0.5` 增加了：
+
+- `--policy.use_state_input=true|false`
+
+对应代码位置：
+
+- `src/lerobot/policies/pi05/configuration_pi05.py`
+- `src/lerobot/policies/pi05/processor_pi05.py`
+- `src/lerobot/policies/factory.py`
+- `tests/policies/pi0_pi05/test_pi05.py`
+
+当前行为分为两层：
+
+- `use_state_input=true` 时：
+  - 会读取 `observation.state`
+  - 会先把 state 归一化后离散化
+  - 再拼进 prompt，格式类似 `Task: ... , State: ...; Action:`
+- `use_state_input=false` 时：
+  - 不再把 state 拼进语言 prompt
+  - prompt 退化为纯任务文本，格式类似 `Task: ...` 后接 `Action:`
+
+但要特别注意，`use_state_input=false` 只表示“不把 state 当作语言输入拼进模型 prompt”，不等价于“训练/推理全流程都不再需要 `observation.state`”。
+
+当前代码里，`pi05` 是否仍然需要 `observation.state`，由下面三个开关共同决定：
+
+- `use_state_input`
+- `use_relative_actions`
+- `canonicalize_bimanual_rot6d`
+
+也就是说，只有在以下条件同时满足时，当前工程才允许彻底不提供 `observation.state`：
+
+- `--policy.use_state_input=false`
+- `--policy.use_relative_actions=false`
+- `--policy.canonicalize_bimanual_rot6d=false`
+
+如果下面任意一个开关仍为 `true`：
+
+- `--policy.use_relative_actions=true`
+- `--policy.canonicalize_bimanual_rot6d=true`
+
+那么当前工程仍会把 `observation.state` 视为必需输入 feature，即使它不会被拼进 prompt。
+
+另外，这次也补了一个兼容性修复：当从已有 checkpoint / pretrained processor 加载时，`factory.py` 会把当前配置里的 `use_state_input` 覆盖写回 `pi05_prepare_state_tokenizer_processor_step`，避免旧 processor 配置把 prompt 行为锁死在保存时的状态。
+
 ## 3. 当前推荐训练配置
 
 典型训练脚本见：
@@ -98,6 +144,8 @@
 - 虽然脚本里只显式写了 `["gripper"]`
 - 只要 `canonicalize_bimanual_rot6d=true`
 - 代码会自动把 `rot6d` 也加入排除列表
+- 上面这条推荐配置默认仍然需要 `observation.state`
+- 即使你额外设置 `--policy.use_state_input=false`，只要 relative/canonical 任一开着，当前实现里也不能把 `observation.state` 从数据里彻底去掉
 
 ## 4. 数据集元信息使用规则
 

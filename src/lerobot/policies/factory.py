@@ -295,6 +295,15 @@ def make_pre_post_processors(
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
 
+        if isinstance(policy_cfg, PI05Config):
+            pi05_prompt_overrides = preprocessor_overrides.setdefault(
+                "pi05_prepare_state_tokenizer_processor_step", {}
+            )
+            pi05_prompt_overrides.setdefault(
+                "use_state_input",
+                getattr(policy_cfg, "use_state_input", True),
+            )
+
         if isinstance(policy_cfg, PI05Config) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
             # Older saved PI0.5 preprocessors may omit canonical source feature names.
             # Rehydrate them from the policy config so local datasets can still be canonicalized correctly.
