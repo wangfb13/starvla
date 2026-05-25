@@ -34,6 +34,7 @@ from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.policies.pi05_full.configuration_pi05 import PI05FullConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
@@ -92,7 +93,7 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
 
     Args:
         name: The name of the policy. Supported names are "tdmpc", "diffusion", "act",
-            "multi_task_dit", "vqbet", "pi0", "pi05", "sac", "reward_classifier", "smolvla", "wall_x".
+            "multi_task_dit", "vqbet", "pi0", "pi05", "pi05_full", "sac", "reward_classifier", "smolvla", "wall_x".
     Returns:
         The policy class corresponding to the given name.
 
@@ -131,6 +132,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.pi05.modeling_pi05 import PI05Policy
 
         return PI05Policy
+    elif name == "pi05_full":
+        from lerobot.policies.pi05_full.modeling_pi05 import PI05FullPolicy
+
+        return PI05FullPolicy
     elif name == "sac":
         from lerobot.policies.sac.modeling_sac import SACPolicy
 
@@ -175,7 +180,7 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
 
     Args:
         policy_type: The type of the policy. Supported types include "tdmpc",
-                     "multi_task_dit", "diffusion", "act", "vqbet", "pi0", "pi05", "sac",
+                     "multi_task_dit", "diffusion", "act", "vqbet", "pi0", "pi05", "pi05_full", "sac",
                      "smolvla", "reward_classifier", "wall_x".
         **kwargs: Keyword arguments to be passed to the configuration class constructor.
 
@@ -199,6 +204,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI0Config(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
+    elif policy_type == "pi05_full":
+        return PI05FullConfig(**kwargs)
     elif policy_type == "sac":
         return SACConfig(**kwargs)
     elif policy_type == "smolvla":
@@ -303,6 +310,14 @@ def make_pre_post_processors(
                 "use_state_input",
                 getattr(policy_cfg, "use_state_input", True),
             )
+        elif isinstance(policy_cfg, PI05FullConfig):
+            pi05_full_prompt_overrides = preprocessor_overrides.setdefault(
+                "pi05_full_prepare_state_tokenizer_processor_step", {}
+            )
+            pi05_full_prompt_overrides.setdefault(
+                "use_state_input",
+                getattr(policy_cfg, "use_state_input", True),
+            )
 
         if isinstance(policy_cfg, PI05Config) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
             # Older saved PI0.5 preprocessors may omit canonical source feature names.
@@ -324,6 +339,28 @@ def make_pre_post_processors(
                 getattr(policy_cfg, "action_mask_observation_key", "observation.action_mask"),
             )
             pi05_canonical_overrides.setdefault(
+                "state_mask_observation_key",
+                getattr(policy_cfg, "state_mask_observation_key", "observation.state_mask"),
+            )
+            kwargs["preprocessor_overrides"] = preprocessor_overrides
+        elif isinstance(policy_cfg, PI05FullConfig) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
+            pi05_full_canonical_overrides = preprocessor_overrides.setdefault(
+                "pi05_full_canonicalize_bimanual_rot6d", {}
+            )
+            pi05_full_canonical_overrides.setdefault(
+                "source_action_feature_names", getattr(policy_cfg, "source_action_feature_names", None)
+            )
+            pi05_full_canonical_overrides.setdefault(
+                "source_state_feature_names", getattr(policy_cfg, "source_state_feature_names", None)
+            )
+            pi05_full_canonical_overrides.setdefault(
+                "missing_value", getattr(policy_cfg, "canonical_missing_value", None)
+            )
+            pi05_full_canonical_overrides.setdefault(
+                "action_mask_observation_key",
+                getattr(policy_cfg, "action_mask_observation_key", "observation.action_mask"),
+            )
+            pi05_full_canonical_overrides.setdefault(
                 "state_mask_observation_key",
                 getattr(policy_cfg, "state_mask_observation_key", "observation.state_mask"),
             )
@@ -405,6 +442,13 @@ def make_pre_post_processors(
         from lerobot.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
 
         processors = make_pi05_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+    elif isinstance(policy_cfg, PI05FullConfig):
+        from lerobot.policies.pi05_full.processor_pi05 import make_pi05_full_pre_post_processors
+
+        processors = make_pi05_full_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )
@@ -558,11 +602,18 @@ def make_policy(
             cfg.source_state_feature_names = list(state_names) if state_names is not None else None
 
         if getattr(cfg, "canonicalize_bimanual_rot6d", False):
-            from lerobot.policies.pi05.canonical_bimanual import (
-                canonical_action_feature_names,
-                canonical_state_feature_names,
-                extend_relative_exclude_joints,
-            )
+            if isinstance(cfg, PI05FullConfig):
+                from lerobot.policies.pi05_full.canonical_bimanual import (
+                    canonical_action_feature_names,
+                    canonical_state_feature_names,
+                    extend_relative_exclude_joints,
+                )
+            else:
+                from lerobot.policies.pi05.canonical_bimanual import (
+                    canonical_action_feature_names,
+                    canonical_state_feature_names,
+                    extend_relative_exclude_joints,
+                )
 
             cfg.output_features[ACTION] = PolicyFeature(
                 type=FeatureType.ACTION, shape=(cfg.canonical_action_dim,)

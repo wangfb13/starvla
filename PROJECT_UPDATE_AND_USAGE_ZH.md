@@ -122,6 +122,75 @@
 
 另外，这次也补了一个兼容性修复：当从已有 checkpoint / pretrained processor 加载时，`factory.py` 会把当前配置里的 `use_state_input` 覆盖写回 `pi05_prepare_state_tokenizer_processor_step`，避免旧 processor 配置把 prompt 行为锁死在保存时的状态。
 
+### 2.5 新增 `pi05_full` policy 目录与策略入口
+
+当前工程已新增一个独立的：
+
+- `src/lerobot/policies/pi05_full/`
+
+它是基于当前仓库里的 `pi05` 目录复制出来的独立 policy 包，已经包含：
+
+- `configuration_pi05.py`
+- `modeling_pi05.py`
+- `processor_pi05.py`
+- `canonical_bimanual.py`
+- `README.md`
+
+这次改动的目的不是立刻把 `vtla_share` 里的完整 language/subtask 分支迁进来，而是先在当前工程里预留一个可独立演进的 `pi05_full` 策略入口，避免后续继续直接改 `pi05` 本体。
+
+当前已经完成的接线包括：
+
+- `PreTrainedConfig.register_subclass("pi05_full")`
+- `PI05FullConfig`
+- `PI05FullPolicy`
+- `make_pi05_full_pre_post_processors`
+- `lerobot.policies.factory.get_policy_class("pi05_full")`
+- `lerobot.policies.factory.make_policy_config("pi05_full")`
+- `lerobot.policies.factory.make_pre_post_processors(...)`
+
+因此当前已经可以使用：
+
+```bash
+--policy.type=pi05_full
+```
+
+来实例化这个新策略。
+
+需要特别注意，当前这个 `pi05_full` 还是“独立目录版的当前 `pi05`”，也就是：
+
+- 目前功能上仍然等价于当前工程里的 `pi05`
+- 还没有迁入 `vtla_share` 里的 `user_prompt / subtask / language decoder` 那套完整逻辑
+- 目前只是先把工程结构和策略入口准备好，方便后续继续做真正的 `pi05_full` 扩展
+
+另外，这次复制目录后还处理了一个很关键的注册冲突问题。由于 `pi05` 和 `pi05_full` 都会向 `ProcessorStepRegistry` 注册 processor step，如果继续沿用原来的 step 名称，导入时会因为重名而直接报错。因此 `pi05_full` 路径下的 step 注册名已经单独改为：
+
+- `pi05_full_canonicalize_bimanual_rot6d`
+- `pi05_full_apply_masks_processor_step`
+- `pi05_full_prepare_state_tokenizer_processor_step`
+
+同时，`factory.py` 中加载 pretrained processor 的 override key 也已同步切换到这组 `pi05_full_*` 名字，避免和原 `pi05` 互相覆盖。
+
+当前还补了一个最小测试：
+
+- `tests/policies/pi0_pi05/test_pi05_full.py`
+
+它主要用于检查：
+
+- `make_policy_config("pi05_full")`
+- `get_policy_class("pi05_full")`
+
+在本机上，已使用环境：
+
+- `/root/miniconda3/envs/lerobot_v0.5.1`
+
+做过轻量验证，确认：
+
+- `make_policy_config("pi05_full")` 返回 `PI05FullConfig`
+- `cfg.type == "pi05_full"`
+- `get_policy_class("pi05_full")` 返回 `PI05FullPolicy`
+
+不过该环境当前没有安装 `pytest`，因此本次只完成了注册/导入级别验证，没有在本机完成完整 pytest 执行。
+
 ## 3. 当前推荐训练配置
 
 典型训练脚本见：
