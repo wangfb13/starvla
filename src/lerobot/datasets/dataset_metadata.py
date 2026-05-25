@@ -520,7 +520,19 @@ class LeRobotDatasetMetadata:
         for key, value in item.items():
             if key in canonical:
                 continue
-            if key in {"episode_index", "frame_index", "index", "timestamp", "task", "subtask", "dataset_index"}:
+            if key in {
+                "episode_index",
+                "frame_index",
+                "index",
+                "timestamp",
+                "task",
+                "subtask",
+                "next_subtask",
+                "user_prompt",
+                "subtask_text_sidecar",
+                "next_subtask_text_sidecar",
+                "dataset_index",
+            }:
                 canonical[key] = value
             elif key.endswith("_is_pad") or key.endswith("_is_missing"):
                 canonical[key] = value

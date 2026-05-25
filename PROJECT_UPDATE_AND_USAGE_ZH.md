@@ -257,7 +257,76 @@
 - 显式 `subtask` 与 fallback `subtask` 的推理分流逻辑工作正常
 - `subtask` 推理缓存与 interval 刷新逻辑工作正常
 
-不过该环境当前没有安装 `pytest`，因此本次没有直接执行 `pytest` 命令，而是使用同一环境下的 Python 直接调用测试函数，已实际跑通 `17` 个回归测试。
+本机当前已在环境：
+
+- `/root/miniconda3/envs/lerobot_v0.5.1`
+
+下直接执行过 `pytest` 回归；本轮与 `pi05_full user_prompt/subtask` 相关的关键用例已通过。
+
+### 2.6 `subtasks.parquet` sidecar 数据兼容增强
+
+这次还补了一块很实用的兼容逻辑，目的是让 `pi05_full` 可以直接消费“只有 `meta/subtasks.parquet`，但 `data` 主表里没有 `subtask_index` 字段”的数据集。
+
+当前支持的行为是：
+
+- 如果数据本身带 `subtask_index`，仍然优先走原来的索引读取逻辑
+- 如果没有 `subtask_index`，但存在 `meta/subtasks.parquet`
+- 且 `subtasks.parquet` 里至少有 `id` 和 `frames` 两列
+- 则 `DatasetReader` 会按 `id` 中的 `ep{episode}` 信息和 `frames=[start, end]` 自动建立每个 episode 的子任务区间映射
+- 命中区间后，会把对应文本注入样本：
+  - `subtask`
+  - `next_subtask`
+  - `subtask_text_sidecar`
+  - `next_subtask_text_sidecar`
+
+同时，为了让这些字段能一路传到 `pi05_full` 预处理，当前还同步补了两层透传：
+
+- `LeRobotDatasetMetadata.canonicalize_item(...)` 现在会保留：
+  - `next_subtask`
+  - `user_prompt`
+  - `subtask_text_sidecar`
+  - `next_subtask_text_sidecar`
+- `batch_to_transition(...)` / complementary data 现在也会继续保留这些 language sidecar 字段
+
+这意味着现在的数据兼容范围更大了：
+
+- 不要求数据转换阶段必须先把 `subtask_index` 写进 parquet 主表
+- 只要 `meta/subtasks.parquet` 标注完整，`pi05_full` 就能在训练侧读到 `subtask / next_subtask`
+- 上层 `TokenizerProcessorStep` 的多级 fallback 也能直接消费这些 sidecar 文本
+
+本次已用真实数据做过验证：
+
+- 数据路径：
+  - `/mnt/cpfs/datasets/pi05_groupA_train_roots_symlink/004__dag911262r00025a_lerobot_0411_055753_train_ready`
+- 实际确认：
+  - `storage_features` 中没有 `subtask_index`
+  - 但 `dataset[idx]` 已可正确返回 sidecar 解析出的 `subtask` 和 `next_subtask`
+- 实际样例包括：
+  - `idx 0`:
+    `subtask = Close the gripper to secure the red cup firmly`
+    `next_subtask = Move the cup steadily toward the paper plate`
+  - `idx 312`:
+    `subtask = Lower the red cup onto the paper plate`
+    `next_subtask = Lift the red cup with spoon and chopsticks inside`
+
+这部分本地也补了对应回归测试：
+
+- `tests/datasets/test_subtask_dataset.py`
+- `tests/processor/test_converters.py`
+
+注意：
+
+- `subtasks.parquet` 中的 `frames` 在真实数据里可能是 `numpy.ndarray`，不是纯 Python `list`
+- 这次已经兼容了 `list / tuple / np.ndarray`
+- 如果未来 sidecar 的 `id` 命名不再包含 `ep{episode}` 片段，则这条自动映射逻辑需要跟着调整
+
+目前这块验证主要是通过：
+
+- sidecar-only 单测
+- converter 透传单测
+- 真实数据集抽样打印
+
+来完成的。完整视频链路的全量回归在当前环境里仍受 `torchcodec / ffmpeg / libstdc++` 依赖限制，但不影响这次 `subtask sidecar -> pi05_full 输入` 这条主路径确认。
 
 ## 3. 当前推荐训练配置
 

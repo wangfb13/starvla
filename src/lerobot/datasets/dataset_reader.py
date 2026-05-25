@@ -17,9 +17,11 @@
 
 from collections.abc import Callable
 from pathlib import Path
+import re
 
 import datasets
 import torch
+import numpy as np
 
 from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.datasets.feature_utils import (
@@ -32,6 +34,29 @@ from lerobot.datasets.io_utils import (
     load_nested_dataset,
 )
 from lerobot.datasets.video_utils import decode_video_frames
+
+
+_SUBTASK_EPISODE_PATTERN = re.compile(r"(?:^|[_-])ep(\d+)(?:[_-]|$)")
+
+
+def _resolve_subtask_row_text(subtask_row, candidate_columns: tuple[str, ...]) -> str | None:
+    for column_name in candidate_columns:
+        if column_name not in subtask_row.index:
+            continue
+
+        value = subtask_row[column_name]
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+
+    fallback_name = getattr(subtask_row, "name", None)
+    if isinstance(fallback_name, str):
+        cleaned = fallback_name.strip()
+        if cleaned:
+            return cleaned
+
+    return None
 
 
 class DatasetReader:
@@ -76,6 +101,7 @@ class DatasetReader:
 
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
+        self._subtask_sidecar_by_episode: dict[int, list[tuple[int, int, str | None, str | None]]] | None = None
 
         # Setup delta_indices (doesn't depend on hf_dataset)
         self.delta_indices = None
@@ -251,6 +277,95 @@ class DatasetReader:
 
         return item
 
+    def _resolve_subtask_text_from_metadata(self, subtask_idx: int) -> str | None:
+        if self._meta.subtasks is None:
+            return None
+        subtask_row = self._meta.subtasks.iloc[subtask_idx]
+        return _resolve_subtask_row_text(subtask_row, ("subtask", "instruction", "description", "skill"))
+
+    def _resolve_next_subtask_text_from_metadata(self, subtask_idx: int) -> str | None:
+        if self._meta.subtasks is None:
+            return None
+        subtask_row = self._meta.subtasks.iloc[subtask_idx]
+        return _resolve_subtask_row_text(subtask_row, ("next_subtask", "next_instruction", "next_description"))
+
+    def _ensure_subtask_sidecar_map(self) -> None:
+        if self._subtask_sidecar_by_episode is not None:
+            return
+
+        self._subtask_sidecar_by_episode = {}
+        if self._meta.subtasks is None or "subtask_index" in self._meta.storage_features:
+            return
+        if not {"id", "frames"}.issubset(self._meta.subtasks.columns):
+            return
+
+        grouped_rows: dict[int, list[tuple[int, int, str | None, str | None]]] = {}
+        for _, subtask_row in self._meta.subtasks.iterrows():
+            subtask_id = subtask_row.get("id")
+            if not isinstance(subtask_id, str):
+                continue
+
+            match = _SUBTASK_EPISODE_PATTERN.search(subtask_id)
+            if match is None:
+                continue
+            episode_index = int(match.group(1))
+
+            frames = subtask_row.get("frames")
+            if not isinstance(frames, (list, tuple, np.ndarray)) or len(frames) != 2:
+                continue
+
+            try:
+                start_frame = int(frames[0])
+                end_frame = int(frames[1])
+            except (TypeError, ValueError):
+                continue
+            if end_frame <= start_frame:
+                continue
+
+            grouped_rows.setdefault(episode_index, []).append(
+                (
+                    start_frame,
+                    end_frame,
+                    _resolve_subtask_row_text(subtask_row, ("subtask", "instruction", "description", "skill")),
+                    _resolve_subtask_row_text(
+                        subtask_row,
+                        ("next_subtask", "next_instruction", "next_description"),
+                    ),
+                )
+            )
+
+        for episode_index, entries in grouped_rows.items():
+            entries.sort(key=lambda entry: entry[0])
+            base_start = entries[0][0]
+            normalized_entries: list[tuple[int, int, str | None, str | None]] = []
+            for start_frame, end_frame, subtask_text, next_subtask_text in entries:
+                local_start = start_frame - base_start
+                local_end = end_frame - base_start
+                if local_end <= local_start:
+                    continue
+                normalized_entries.append((local_start, local_end, subtask_text, next_subtask_text))
+
+            if normalized_entries:
+                self._subtask_sidecar_by_episode[episode_index] = normalized_entries
+
+    def _lookup_sidecar_subtask(self, ep_idx: int, frame_idx: int) -> dict[str, str] | None:
+        self._ensure_subtask_sidecar_map()
+        if not self._subtask_sidecar_by_episode:
+            return None
+
+        for local_start, local_end, subtask_text, next_subtask_text in self._subtask_sidecar_by_episode.get(ep_idx, []):
+            if local_start <= frame_idx < local_end:
+                result: dict[str, str] = {}
+                if subtask_text is not None:
+                    result["subtask"] = subtask_text
+                    result["subtask_text_sidecar"] = subtask_text
+                if next_subtask_text is not None:
+                    result["next_subtask"] = next_subtask_text
+                    result["next_subtask_text_sidecar"] = next_subtask_text
+                return result or None
+
+        return None
+
     def get_item(self, idx) -> dict:
         """Core __getitem__ logic. Assumes hf_dataset is loaded.
 
@@ -288,6 +403,15 @@ class DatasetReader:
         # add subtask information if available
         if "subtask_index" in self._meta.storage_features and self._meta.subtasks is not None:
             subtask_idx = item["subtask_index"].item()
-            item["subtask"] = self._meta.subtasks.iloc[subtask_idx].name
+            subtask_text = self._resolve_subtask_text_from_metadata(subtask_idx)
+            if subtask_text is not None:
+                item["subtask"] = subtask_text
+            next_subtask_text = self._resolve_next_subtask_text_from_metadata(subtask_idx)
+            if next_subtask_text is not None:
+                item["next_subtask"] = next_subtask_text
+        elif "frame_index" in item:
+            subtask_sidecar = self._lookup_sidecar_subtask(ep_idx, item["frame_index"].item())
+            if subtask_sidecar is not None:
+                item.update(subtask_sidecar)
 
         return item

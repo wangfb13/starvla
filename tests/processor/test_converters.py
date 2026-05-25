@@ -243,6 +243,28 @@ def test_batch_to_transition_with_index_fields():
     assert comp_data["task"] == batch["task"]
 
 
+def test_batch_to_transition_preserves_language_sidecar_fields():
+    batch = {
+        OBS_STATE: torch.randn(1, 7),
+        "task": ["pick_cube"],
+        "user_prompt": ["pick the cube"],
+        "subtask": ["approach cube"],
+        "next_subtask": ["close gripper"],
+        "subtask_text_sidecar": ["approach cube"],
+        "next_subtask_text_sidecar": ["close gripper"],
+    }
+
+    transition = batch_to_transition(batch)
+    comp_data = transition[TransitionKey.COMPLEMENTARY_DATA]
+
+    assert comp_data["task"] == batch["task"]
+    assert comp_data["user_prompt"] == batch["user_prompt"]
+    assert comp_data["subtask"] == batch["subtask"]
+    assert comp_data["next_subtask"] == batch["next_subtask"]
+    assert comp_data["subtask_text_sidecar"] == batch["subtask_text_sidecar"]
+    assert comp_data["next_subtask_text_sidecar"] == batch["next_subtask_text_sidecar"]
+
+
 def testtransition_to_batch_with_index_fields():
     """Test that transition_to_batch handles index and task_index fields correctly."""
 

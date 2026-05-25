@@ -28,6 +28,7 @@ import pytest
 import torch
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import DEFAULT_SUBTASKS_PATH
 
 
 class TestSubtaskDataset:
@@ -137,6 +138,82 @@ class TestSubtaskDatasetMissing:
     def test_subtasks_metadata_is_none(self, dataset_without_subtasks):
         """Test that subtasks metadata is None when not present."""
         assert dataset_without_subtasks.meta.subtasks is None
+
+
+class TestSubtaskSidecarFallback:
+    """Tests for datasets that provide subtask text sidecars without subtask_index features."""
+
+    @pytest.fixture
+    def dataset_with_subtask_sidecar(self, tmp_path, empty_lerobot_dataset_factory):
+        features = {"state": {"dtype": "float32", "shape": (2,), "names": None}}
+        dataset = empty_lerobot_dataset_factory(root=tmp_path / "subtask_sidecar_only", features=features)
+
+        for _ in range(3):
+            dataset.add_frame({"state": torch.randn(2), "task": "Task episode 0"})
+        dataset.save_episode()
+
+        for _ in range(4):
+            dataset.add_frame({"state": torch.randn(2), "task": "Task episode 1"})
+        dataset.save_episode()
+        dataset.finalize()
+
+        subtasks = pd.DataFrame(
+            [
+                {
+                    "id": "chunk-000_ep0_sub0",
+                    "frames": [0, 2],
+                    "instruction": "subtask ep0 part0",
+                    "next_instruction": "subtask ep0 part1",
+                },
+                {
+                    "id": "chunk-000_ep0_sub1",
+                    "frames": [2, 3],
+                    "instruction": "subtask ep0 part1",
+                    "next_instruction": "",
+                },
+                {
+                    "id": "chunk-000_ep1_sub0",
+                    "frames": [0, 1],
+                    "instruction": "subtask ep1 part0",
+                    "next_instruction": "subtask ep1 part1",
+                },
+                {
+                    "id": "chunk-000_ep1_sub1",
+                    "frames": [1, 4],
+                    "instruction": "subtask ep1 part1",
+                    "next_instruction": "subtask ep1 done",
+                },
+            ]
+        )
+        subtasks_path = dataset.root / DEFAULT_SUBTASKS_PATH
+        subtasks_path.parent.mkdir(parents=True, exist_ok=True)
+        subtasks.to_parquet(subtasks_path)
+
+        return LeRobotDataset(dataset.repo_id, root=dataset.root)
+
+    def test_sidecar_subtasks_load_without_subtask_index(self, dataset_with_subtask_sidecar):
+        assert "subtask_index" not in dataset_with_subtask_sidecar.features
+        assert dataset_with_subtask_sidecar.meta.subtasks is not None
+
+    def test_sidecar_subtasks_are_resolved_per_frame(self, dataset_with_subtask_sidecar):
+        first_item = dataset_with_subtask_sidecar[0]
+        third_item = dataset_with_subtask_sidecar[2]
+        fourth_item = dataset_with_subtask_sidecar[3]
+        last_item = dataset_with_subtask_sidecar[6]
+
+        assert first_item["subtask"] == "subtask ep0 part0"
+        assert first_item["next_subtask"] == "subtask ep0 part1"
+        assert first_item["subtask_text_sidecar"] == "subtask ep0 part0"
+        assert first_item["next_subtask_text_sidecar"] == "subtask ep0 part1"
+
+        assert third_item["subtask"] == "subtask ep0 part1"
+        assert "next_subtask" not in third_item or third_item["next_subtask"] == ""
+
+        assert fourth_item["subtask"] == "subtask ep1 part0"
+        assert fourth_item["next_subtask"] == "subtask ep1 part1"
+
+        assert last_item["subtask"] == "subtask ep1 part1"
+        assert last_item["next_subtask"] == "subtask ep1 done"
 
 
 class TestSubtaskEdgeCases:
