@@ -31,7 +31,7 @@ python src/lerobot/scripts/lerobot_record.py \
   --dataset.num_episodes=10 \
   --dataset.episode_time_s=600 \
   --dataset.reset_time_s=5 \
-  --dataset.single_task="peg in hole" \
+  --dataset.single_task="pick up the peg and place it in the hole" \
   --dataset.streaming_encoding=false \
   --policy.path=./outputs/pi05_peg_in_hole_200/30000/pretrained_model \
   --policy.device=cuda \
