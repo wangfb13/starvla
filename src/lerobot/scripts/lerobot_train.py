@@ -265,8 +265,16 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         processor_pretrained_path = None
 
     processor_stats = dataset.meta.stats
-    if cfg.policy.type == "pi05" and getattr(cfg.policy, "canonicalize_bimanual_rot6d", False):
-        from lerobot.policies.pi05.canonical_bimanual import build_canonical_bimanual_stats
+    sidecar_stats_available = bool(getattr(dataset.meta, "sidecar_stats_loaded", False))
+    if (
+        cfg.policy.type in {"pi05", "pi05_full"}
+        and getattr(cfg.policy, "canonicalize_bimanual_rot6d", False)
+        and not sidecar_stats_available
+    ):
+        if cfg.policy.type == "pi05_full":
+            from lerobot.policies.pi05_full.canonical_bimanual import build_canonical_bimanual_stats
+        else:
+            from lerobot.policies.pi05.canonical_bimanual import build_canonical_bimanual_stats
 
         processor_stats = build_canonical_bimanual_stats(
             dataset,
@@ -276,6 +284,21 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             use_relative_actions=getattr(cfg.policy, "use_relative_actions", False),
             relative_exclude_joints=getattr(cfg.policy, "relative_exclude_joints", None),
             base_stats=dataset.meta.stats,
+        )
+    elif (
+        cfg.policy.type in {"pi05", "pi05_full"}
+        and getattr(cfg.policy, "canonicalize_bimanual_rot6d", False)
+        and sidecar_stats_available
+    ):
+        state_shape = dataset.meta.features.get("observation.state", {}).get("shape")
+        action_shape = dataset.meta.features.get("action", {}).get("shape")
+        logging.warning(
+            "Skipping dynamic canonical bimanual stats because sidecar stats are configured. "
+            "Current dataset feature shapes: observation.state=%s action=%s. "
+            "If the sidecar already contains canonical 22D/20D state/action, set "
+            "policy.canonicalize_bimanual_rot6d=false to avoid online double-canonicalization.",
+            state_shape,
+            action_shape,
         )
 
     # Create processors - only provide dataset_stats if not resuming from saved processors

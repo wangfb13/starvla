@@ -12,10 +12,10 @@ nohup python src/lerobot/scripts/lerobot_train.py \
     --dataset.root=/mnt/sparky_data/ugripper_peg_in_hole_v1gripper_3/sparky_ugripper_peg_in_hole_200_v30_unified \
     --dataset.info_path=meta/info_fisheye.json \
     --policy.type=pi05 \
-    --output_dir=./outputs/pi05_peg_in_hole_200 \
-    --job_name=pi05_peg_in_hole_200 \
+    --output_dir=./outputs/pi05_peg_in_hole_200_nostate_training101 \
+    --job_name=pi05_peg_in_hole_200_nostate_training101 \
     --policy.pretrained_path=lerobot/pi05_base \
-    --policy.repo_id=pi05_peg_in_hole_200 \
+    --policy.repo_id=pi05_peg_in_hole_200_nostate_training101 \
     --policy.compile_model=false \
     --policy.gradient_checkpointing=false \
     --policy.dtype=bfloat16 \
@@ -28,9 +28,9 @@ nohup python src/lerobot/scripts/lerobot_train.py \
     --policy.canonical_missing_value=9930.0 \
     --policy.push_to_hub=false \
     --steps=30000 \
-    --save_freq=10000 \
+    --save_freq=5000 \
     --batch_size=8 \
-    --eval_freq=0   > pi05_peg_in_hole_200_training100_0518.log 2>&1 &
+    --eval_freq=0   > pi05_peg_in_hole_200_nostate_training101_0525.log 2>&1 &
 
     # --dataset.video_backend=pyav \
     # --dataset.repo_id=dag911262r00025a_lerobot_0429_193253_6_deformation_cam_left_only \

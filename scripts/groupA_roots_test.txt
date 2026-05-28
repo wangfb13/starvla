@@ -1,0 +1,2 @@
+/mnt/tacumi_data/lerobot_datasetV30_train_ready/test/dag911262r00207e_dag911262r002179_pair_0422_113050
+/mnt/tacumi_data/lerobot_datasetV30_train_ready/test/DAG911262R00377E_lerobot_0526_093034

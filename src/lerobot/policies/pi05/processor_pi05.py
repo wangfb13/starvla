@@ -54,6 +54,13 @@ from lerobot.utils.constants import (
 )
 
 
+def _broadcast_feature_mask(mask: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    mask = mask.to(dtype=target.dtype, device=target.device)
+    while mask.ndim < target.ndim:
+        mask = mask.unsqueeze(-2)
+    return mask
+
+
 @ProcessorStepRegistry.register(name="pi05_canonicalize_bimanual_rot6d")
 @dataclass
 class Pi05CanonicalizeBimanualRot6DProcessorStep(ProcessorStep):
@@ -138,8 +145,11 @@ class Pi05ApplyMasksProcessorStep(ProcessorStep):
         action = transition.get(TransitionKey.ACTION)
         action_mask = observation.get(self.action_mask_observation_key)
         if action is not None and action_mask is not None:
-            action_mask = action_mask.to(dtype=action.dtype, device=action.device)
-            transition[TransitionKey.ACTION] = action * action_mask
+            action = action.clone()
+            action_mask = _broadcast_feature_mask(action_mask, action)
+            masked_dims = min(action_mask.shape[-1], action.shape[-1])
+            action[..., :masked_dims] = action[..., :masked_dims] * action_mask[..., :masked_dims]
+            transition[TransitionKey.ACTION] = action
 
         return transition
 

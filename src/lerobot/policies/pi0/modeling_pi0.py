@@ -1049,8 +1049,27 @@ class PI0Policy(PreTrainedPolicy):
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
 
+            model_state_dict = model.state_dict()
+            compatible_state_dict = {}
+            shape_mismatched_keys = []
+            for key, value in remapped_state_dict.items():
+                target_value = model_state_dict.get(key)
+                if target_value is not None and target_value.shape != value.shape:
+                    shape_mismatched_keys.append((key, tuple(value.shape), tuple(target_value.shape)))
+                    continue
+                compatible_state_dict[key] = value
+
+            if shape_mismatched_keys:
+                print(f"Skipping {len(shape_mismatched_keys)} state dict keys with incompatible shapes")
+                for key, checkpoint_shape, model_shape in shape_mismatched_keys[:10]:
+                    print(f"  - {key}: checkpoint {checkpoint_shape} -> model {model_shape}")
+                if len(shape_mismatched_keys) > 10:
+                    print(f"  ... and {len(shape_mismatched_keys) - 10} more")
+
             # Load the remapped state dict into the model
-            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+            load_strict = strict and not shape_mismatched_keys
+            missing_keys, unexpected_keys = model.load_state_dict(compatible_state_dict, strict=load_strict)
+            skipped_key_names = {key for key, _, _ in shape_mismatched_keys}
 
             if missing_keys:
                 print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
@@ -1074,6 +1093,8 @@ class PI0Policy(PreTrainedPolicy):
 
             if not missing_keys and not unexpected_keys:
                 print("All keys loaded successfully!")
+            elif shape_mismatched_keys and not unexpected_keys and set(missing_keys).issubset(skipped_key_names):
+                print("Compatible pretrained keys loaded successfully; shape-mismatched keys were reinitialized.")
 
         except Exception as e:
             print(f"Warning: Could not load state dict: {e}")

@@ -61,6 +61,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
         encoder_threads: int | None = None,
+        sidecar_path: str | Path | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -196,6 +197,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.repo_id = repo_id
         self._requested_root = Path(root) if root else None
         self._info_path = Path(info_path) if info_path is not None else None
+        self.sidecar_path = Path(sidecar_path) if sidecar_path is not None else None
         self.reader = None
         self.set_image_transforms(image_transforms)
         self.delta_timestamps = delta_timestamps
@@ -217,6 +219,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.revision,
             force_cache_sync=force_cache_sync,
             info_path=self._info_path,
+            sidecar_path=self.sidecar_path,
         )
         self.root = self.meta.root
         self.revision = self.meta.revision
@@ -230,6 +233,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             video_backend=self._video_backend,
             delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
+            sidecar_path=self.sidecar_path,
         )
 
         # Load actual data
@@ -292,6 +296,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 video_backend=self._video_backend,
                 delta_timestamps=self.delta_timestamps,
                 image_transforms=self.image_transforms,
+                sidecar_path=self.sidecar_path,
             )
         return self.reader
 
@@ -495,6 +500,19 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def clear_image_transforms(self) -> None:
         """Remove the transform applied to visual observations."""
         self.set_image_transforms(None)
+
+    @property
+    def sidecar_default_values(self) -> dict[str, object]:
+        reader = self._ensure_reader()
+        return reader.sidecar.default_values
+
+    def sidecar_vector_dim(self, key: str) -> int | None:
+        reader = self._ensure_reader()
+        return reader.sidecar.vector_dim(key)
+
+    def sidecar_vector_stats(self, key: str):
+        reader = self._ensure_reader()
+        return reader.sidecar.vector_stats(key)
 
     # ── Hub methods (stay on facade) ──────────────────────────────────
 

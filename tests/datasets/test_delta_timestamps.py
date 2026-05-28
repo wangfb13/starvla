@@ -14,6 +14,7 @@
 import pytest
 
 from lerobot.datasets.factory import resolve_delta_timestamps
+from lerobot.datasets.factory import _apply_automatic_action_gap_overrides
 from lerobot.datasets.feature_utils import (
     check_delta_timestamps,
     get_delta_indices,
@@ -158,6 +159,39 @@ def test_pi05_action_gap_dataset_overrides():
 
     assert cfg.get_action_delta_indices(dataset_index=0) == [2, 3, 4]
     assert cfg.get_action_delta_indices(dataset_index=1) == [5, 6, 7]
+
+
+def test_pi05_auto_real_robot_gap_override():
+    class DummyMeta:
+        @property
+        def robot_type(self):
+            return "spark3_pose_gripper"
+
+    cfg = PI05Config(chunk_size=3, n_action_steps=3, action_gap_frames=6)
+
+    _apply_automatic_action_gap_overrides(cfg, [(0, DummyMeta())])
+
+    assert cfg.action_gap_dataset_overrides == ["0:0"]
+    assert cfg.get_action_delta_indices(dataset_index=0) == [0, 1, 2]
+
+
+def test_pi05_explicit_gap_override_wins_over_auto_real_robot_gap():
+    class DummyMeta:
+        @property
+        def robot_type(self):
+            return "spark3_pose_gripper"
+
+    cfg = PI05Config(
+        chunk_size=3,
+        n_action_steps=3,
+        action_gap_frames=6,
+        action_gap_dataset_overrides=["0:4"],
+    )
+
+    _apply_automatic_action_gap_overrides(cfg, [(0, DummyMeta())])
+
+    assert cfg.action_gap_dataset_overrides == ["0:4"]
+    assert cfg.get_action_delta_indices(dataset_index=0) == [4, 5, 6]
 
 
 def test_resolve_delta_timestamps_uses_pi05_action_gap():

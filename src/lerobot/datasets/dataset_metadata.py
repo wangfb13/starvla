@@ -133,6 +133,7 @@ class LeRobotDatasetMetadata:
         force_cache_sync: bool = False,
         metadata_buffer_size: int = 10,
         info_path: str | Path | None = None,
+        sidecar_path: str | Path | None = None,
     ):
         """Load or download metadata for an existing LeRobot dataset.
 
@@ -160,6 +161,7 @@ class LeRobotDatasetMetadata:
         self._requested_root = Path(root) if root is not None else None
         self.root = self._requested_root if self._requested_root is not None else HF_LEROBOT_HOME / repo_id
         self._info_path = Path(info_path) if info_path is not None else None
+        self.sidecar_path = Path(sidecar_path) if sidecar_path is not None else None
         self.storage_info: dict[str, Any] | None = None
         self._info_template: dict[str, Any] | None = None
         self._pq_writer = None
@@ -180,6 +182,17 @@ class LeRobotDatasetMetadata:
 
             self._pull_from_repo(allow_patterns="meta/")
             self._load_metadata()
+
+        if self.sidecar_path is not None:
+            from lerobot.datasets.sidecar_utils import FramewiseSidecar, apply_canonical_sidecar_feature_overrides
+
+            self._sidecar_for_metadata = FramewiseSidecar(self.sidecar_path, repo_id=self.repo_id)
+            self.info["features"] = apply_canonical_sidecar_feature_overrides(
+                self.info["features"],
+                self._sidecar_for_metadata,
+            )
+        else:
+            self._sidecar_for_metadata = None
 
     def _flush_metadata_buffer(self) -> None:
         """Write all buffered episode metadata to parquet file."""
@@ -536,6 +549,17 @@ class LeRobotDatasetMetadata:
                 canonical[key] = value
             elif key.endswith("_is_pad") or key.endswith("_is_missing"):
                 canonical[key] = value
+
+        # Keep language-side complementary keys structurally stable so the default
+        # DataLoader collate_fn does not fail when some frames lack subtask annotations.
+        for key in (
+            "subtask",
+            "next_subtask",
+            "user_prompt",
+            "subtask_text_sidecar",
+            "next_subtask_text_sidecar",
+        ):
+            canonical.setdefault(key, "")
 
         return canonical
 

@@ -462,6 +462,58 @@ def test_multilerobot_dataset_remaps_task_index_to_global_schema(tmp_path, empty
     assert right_item["task_index"].item() == 1
 
 
+def test_multilerobot_dataset_remaps_sidecar_task_caption_to_global_schema(
+    tmp_path, empty_lerobot_dataset_factory
+):
+    root = tmp_path / "multi_sidecar_task_index"
+    sidecar_root = tmp_path / "sidecars"
+    repo_ids = ["lerobot/base_task", "lerobot/other_task"]
+    features = {
+        OBS_STATE: {"dtype": "float32", "shape": (1,), "names": None},
+        ACTION: {"dtype": "float32", "shape": (1,), "names": None},
+    }
+
+    base_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[0], repo_id=repo_ids[0], use_videos=False, features=features
+    )
+    base_dataset.add_frame({OBS_STATE: torch.zeros(1), ACTION: torch.zeros(1), "task": "base task"})
+    base_dataset.save_episode()
+
+    other_dataset = empty_lerobot_dataset_factory(
+        root=root / repo_ids[1], repo_id=repo_ids[1], use_videos=False, features=features
+    )
+    other_dataset.add_frame({OBS_STATE: torch.zeros(1), ACTION: torch.zeros(1), "task": "other task"})
+    other_dataset.save_episode()
+
+    sidecar_task = "sidecar task caption"
+    sidecar_path = sidecar_root / repo_ids[0] / "framewise_guidance.parquet"
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "index": 0,
+                "task_vlm_caption": sidecar_task,
+            }
+        ]
+    ).to_parquet(sidecar_path, index=False)
+
+    dataset = MultiLeRobotDataset(
+        repo_ids,
+        root=root,
+        download_videos=False,
+        sidecar_paths={repo_ids[0]: sidecar_path},
+    )
+
+    sidecar_item = dataset[0]
+    other_item = dataset[1]
+
+    assert sidecar_item["task"] == sidecar_task
+    assert sidecar_task in dataset.meta.tasks.index
+    assert sidecar_item["task_index"].item() == int(dataset.meta.tasks.loc[sidecar_task, "task_index"])
+    assert other_item["task"] == "other task"
+    assert other_item["task_index"].item() == int(dataset.meta.tasks.loc["other task", "task_index"])
+
+
 def test_multilerobot_dataset_unions_visual_keys_and_adds_missing_masks(
     tmp_path, empty_lerobot_dataset_factory
 ):

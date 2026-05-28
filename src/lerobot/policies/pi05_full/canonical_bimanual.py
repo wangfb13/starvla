@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,8 @@ import torch
 from torch import Tensor
 
 from lerobot.utils.constants import ACTION, OBS_STATE
+
+logger = logging.getLogger(__name__)
 
 ARM_NAMES = ("left", "right")
 ARM_CANONICAL_DIM = 10
@@ -509,14 +512,39 @@ def _collect_state_action_arrays(single_dataset: Any) -> tuple[np.ndarray, np.nd
     if hf_dataset is None:
         raise ValueError("Reader failed to load the Hugging Face dataset for canonical stats computation.")
 
+    dataset_name = getattr(getattr(single_dataset, "meta", None), "repo_id", None) or getattr(
+        getattr(single_dataset, "root", None), "name", None
+    )
+    dataset_name = dataset_name or type(single_dataset).__name__
+    logger.info(
+        "[pi05_full canonical stats] collecting raw arrays for dataset=%s num_rows=%s relative_actions=%s",
+        dataset_name,
+        len(hf_dataset),
+        reader.delta_indices is not None and ACTION in reader.delta_indices,
+    )
+
     raw_states = np.asarray(hf_dataset[OBS_STATE], dtype=np.float32)
 
     if reader.delta_indices is None or ACTION not in reader.delta_indices:
         raw_actions = np.asarray(hf_dataset[ACTION], dtype=np.float32)
+        logger.info(
+            "[pi05_full canonical stats] collected direct action arrays for dataset=%s state_shape=%s action_shape=%s",
+            dataset_name,
+            raw_states.shape,
+            raw_actions.shape,
+        )
         return raw_states, raw_actions
 
     action_windows: list[np.ndarray] = []
+    progress_interval = max(1, len(hf_dataset) // 10)
     for relative_idx in range(len(hf_dataset)):
+        if relative_idx % progress_interval == 0:
+            logger.info(
+                "[pi05_full canonical stats] dataset=%s collecting relative action windows %d/%d",
+                dataset_name,
+                relative_idx,
+                len(hf_dataset),
+            )
         item = hf_dataset[relative_idx]
         episode_index = item["episode_index"]
         absolute_index = item["index"]
@@ -528,7 +556,14 @@ def _collect_state_action_arrays(single_dataset: Any) -> tuple[np.ndarray, np.nd
         query_result = reader._query_hf_dataset({ACTION: query_indices[ACTION]})
         action_windows.append(query_result[ACTION].cpu().numpy())
 
-    return raw_states, np.asarray(action_windows, dtype=np.float32)
+    raw_actions = np.asarray(action_windows, dtype=np.float32)
+    logger.info(
+        "[pi05_full canonical stats] collected relative action windows for dataset=%s state_shape=%s action_shape=%s",
+        dataset_name,
+        raw_states.shape,
+        raw_actions.shape,
+    )
+    return raw_states, raw_actions
 
 
 def build_canonical_bimanual_stats(
@@ -545,16 +580,38 @@ def build_canonical_bimanual_stats(
         raise ValueError("dataset is required to build canonical rot6d statistics")
 
     datasets_list = getattr(dataset, "_datasets", [dataset])
+    logger.info(
+        "[pi05_full canonical stats] start building canonical stats datasets=%d use_relative_actions=%s",
+        len(datasets_list),
+        use_relative_actions,
+    )
     state_batches = []
     action_batches = []
-    for child_dataset in datasets_list:
+    for dataset_idx, child_dataset in enumerate(datasets_list):
+        dataset_name = getattr(getattr(child_dataset, "meta", None), "repo_id", None) or getattr(
+            getattr(child_dataset, "root", None), "name", None
+        )
+        dataset_name = dataset_name or type(child_dataset).__name__
+        logger.info(
+            "[pi05_full canonical stats] processing child dataset %d/%d: %s",
+            dataset_idx + 1,
+            len(datasets_list),
+            dataset_name,
+        )
         states, actions = _collect_state_action_arrays(child_dataset)
         state_batches.append(states)
         action_batches.append(actions)
 
+    logger.info("[pi05_full canonical stats] concatenating collected state/action batches")
     raw_states = np.concatenate(state_batches, axis=0)
     raw_actions = np.concatenate(action_batches, axis=0)
+    logger.info(
+        "[pi05_full canonical stats] concatenated raw arrays state_shape=%s action_shape=%s",
+        raw_states.shape,
+        raw_actions.shape,
+    )
 
+    logger.info("[pi05_full canonical stats] canonicalizing state/action arrays to rot6d space")
     canonical = canonicalize_bimanual_state_action(
         state=torch.from_numpy(raw_states),
         action=torch.from_numpy(raw_actions),
@@ -585,6 +642,8 @@ def build_canonical_bimanual_stats(
             state_reference = state_reference.unsqueeze(-2)
         canonical_actions -= state_reference * relative_mask
 
+    logger.info("[pi05_full canonical stats] computing masked stats for canonical state/action tensors")
     stats[OBS_STATE] = _compute_masked_stats(canonical[OBS_STATE], state_mask, canonical_state_feature_names())
     stats[ACTION] = _compute_masked_stats(canonical_actions, action_mask, canonical_action_feature_names())
+    logger.info("[pi05_full canonical stats] finished building canonical stats")
     return stats

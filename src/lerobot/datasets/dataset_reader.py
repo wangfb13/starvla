@@ -33,6 +33,7 @@ from lerobot.datasets.io_utils import (
     hf_transform_to_torch,
     load_nested_dataset,
 )
+from lerobot.datasets.sidecar_utils import FramewiseSidecar
 from lerobot.datasets.video_utils import decode_video_frames
 
 
@@ -74,6 +75,7 @@ class DatasetReader:
         video_backend: str,
         delta_timestamps: dict[str, list[float]] | None,
         image_transforms: Callable | None,
+        sidecar_path: str | Path | None = None,
     ):
         """Initialize the reader with metadata, filtering, and transform config.
 
@@ -98,6 +100,7 @@ class DatasetReader:
         self._tolerance_s = tolerance_s
         self._video_backend = video_backend
         self._image_transforms = image_transforms
+        self.sidecar = FramewiseSidecar(sidecar_path, repo_id=meta.repo_id)
 
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
@@ -378,12 +381,19 @@ class DatasetReader:
         abs_idx = item["index"].item()
 
         query_indices = None
+        sidecar_chunk_keys: set[str] = set()
         if self.delta_indices is not None:
             query_indices, padding = self._get_query_indices(abs_idx, ep_idx)
             query_result = self._query_hf_dataset(query_indices)
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
+
+            for key, q_idx in query_indices.items():
+                sidecar_values = self.sidecar.values_for_indices(key, q_idx)
+                if sidecar_values is not None:
+                    item[key] = sidecar_values
+                    sidecar_chunk_keys.add(key)
 
         if len(self._meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
@@ -396,9 +406,12 @@ class DatasetReader:
             for cam in image_keys:
                 item[cam] = self._image_transforms(item[cam])
 
+        item = self.sidecar.overlay(item, abs_idx, skip_keys=sidecar_chunk_keys)
+
         # Add task as a string
-        task_idx = item["task_index"].item()
-        item["task"] = self._meta.tasks.iloc[task_idx].name
+        if "task" not in item or not isinstance(item["task"], str):
+            task_idx = item["task_index"].item()
+            item["task"] = self._meta.tasks.iloc[task_idx].name
 
         # add subtask information if available
         if "subtask_index" in self._meta.storage_features and self._meta.subtasks is not None:

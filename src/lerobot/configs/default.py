@@ -39,6 +39,16 @@ class DatasetConfig:
     # - relative paths are resolved under each local dataset root
     # This is useful for selecting a shared visual schema (e.g. fisheye-only cameras).
     info_path: str | None = None
+    # Optional text file containing one local dataset root per line. This is convenient for training over
+    # symlink lists such as scripts/groupA_roots.txt without materializing another parent directory.
+    roots_file: str | None = None
+    # Optional framewise sidecar settings. sidecar_root expects per-dataset subdirectories containing
+    # framewise_guidance.parquet/stats.json files. sidecar_path can be a single path or a mapping keyed by
+    # dataset root/name. stats_path and relative_stats_path follow the same shape.
+    sidecar_root: str | None = None
+    sidecar_path: str | dict[str, str] | None = None
+    stats_path: str | dict[str, str] | None = None
+    relative_stats_path: str | dict[str, str] | None = None
     episodes: list[int] | None = None
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)
     revision: str | None = None

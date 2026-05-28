@@ -659,12 +659,13 @@ UMI 数据中的 `observation.state` 和 `action` 都是在设备开机后由 VS
 
 `action_gap_frames` 用来控制“用当前帧状态/图像预测未来第几帧开始的 action”。例如 `action_gap_frames=6` 且 `chunk_size=50` 时，当前样本对应的 action chunk 会从当前帧之后第 6 帧开始取，范围相当于 `[t+6, t+7, ..., t+55]`。
 
-这个功能主要用于处理 observation 和 action 之间的时间对齐问题。对于 UMI 数据，`state` 和 `action` 往往来自同一时刻的轨迹记录，并不天然包含机器人“下发动作到执行完成”的延时；如果希望模型从当前观测预测稍后会执行到的位置，就可以通过 `action_gap_frames` 把监督信号往未来移动。对于真机 LeRobot 采集数据，是否需要 gap 取决于数据转换口径和任务控制延时，不能简单照搬 UMI 的设置。
+这个功能主要用于处理 observation 和 action 之间的时间对齐问题。对于 UMI 数据，`state` 和 `action` 往往来自同一时刻的轨迹记录，并不天然包含机器人“下发动作到执行完成”的延时；如果希望模型从当前观测预测稍后会执行到的位置，就可以通过 `action_gap_frames` 把监督信号往未来移动。对于当前真机 LeRobot 数据，记录到的 `state/action` 已经考虑了控制延时，因此训练加载器会根据 `robot_type=spark3_pose_gripper` 自动把该子数据集的 action gap 设为 0。
 
 ### 16.3 训练配置建议
 
   - 单一 gap 设置：使用 `--policy.action_gap_frames=<gap>`。
-  - 多数据集混训且不同数据源需要不同 gap：使用 `--policy.action_gap_dataset_overrides=<dataset_index>:<gap>`。
+  - UMI + 真机混训时，可以直接设置 UMI 所需的全局 gap，例如 `--policy.action_gap_frames=6`；真机数据会自动补 `action_gap_dataset_overrides=<dataset_index>:0`，UMI 保持全局 gap。
+  - 多数据集混训且需要手动覆盖某个数据源 gap：使用 `--policy.action_gap_dataset_overrides=<dataset_index>:<gap>`。显式配置优先级高于自动推断。
   - 如果为了对齐 UMI 数据，需要用当前真实末端位姿生成 action，建议在数据预处理阶段显式生成和 `state` 同口径的 `action`，再由 `action_gap_frames` 决定训练时取未来多少帧作为监督。
   - 修改 gap 后需要重新确认 `delta_timestamps`、`chunk_size` 和离线评估脚本是否使用同一套配置，避免训练和评估取到不同帧。
 
@@ -733,3 +734,149 @@ all tactile batch_shape=(3, 3, 96, 128)
   - key 统一逻辑：`src/lerobot/datasets/multi_dataset.py`
   - 空视觉/触觉 tensor shape 逻辑：`src/lerobot/datasets/dataset_metadata.py`
   - 单元测试：`tests/datasets/test_datasets.py`
+
+## 18. PI05/PI05_FULL canonical sidecar 训练入口
+
+### 18.1 预处理输出
+
+`scripts/build_pi05_canonical_sidecar.py` 会为每个数据集目录生成一个 sidecar 子目录，默认结构如下：
+
+```text
+{sidecar_root}/{dataset_root.name}/framewise_guidance.parquet
+{sidecar_root}/{dataset_root.name}/stats.json
+{sidecar_root}/{dataset_root.name}/stats_relative_action_chunk{N}_gap{G}.json
+{sidecar_root}/{dataset_root.name}/summary.json
+```
+
+其中 `framewise_guidance.parquet` 覆盖训练时读取到的 `observation.state` 和 `action`：
+
+- `observation.state`: canonical 22D，左手 10D + 右手 10D + 左右手有效位。
+- `action`: canonical 20D，左手 10D + 右手 10D。
+- 每只手 10D 为 `xyz + rot6d(6) + gripper`。
+- `state_mask` / `action_valid_mask` 会在加载时映射成 `observation.state_mask` / `observation.action_mask`，用于 pi05/pi05_full mask step。
+
+UMI 数据在预处理阶段会先按每个 episode 第一帧有效 state pose 做相对位姿，再转成 rot6d；真机数据保持原始坐标系，只做 canonical + quat 转 rot6d。
+
+### 18.2 训练参数
+
+现在训练入口支持直接指定 roots txt，不再要求所有数据先放在同一个父目录下：
+
+```bash
+--dataset.roots_file=/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/groupA_roots.txt \
+--dataset.sidecar_root=/mnt/cpfs/repo/pi05_canonical_sidecars_groupA
+```
+
+`dataset.roots_file` 一行一个本地 LeRobot 数据集根目录，可以是不同父目录下的路径，但最后一级目录名必须唯一。sidecar 会按 `{sidecar_root}/{dataset_root.name}/framewise_guidance.parquet` 自动解析。
+
+单数据集调试时也可以直接指定一个 parquet：
+
+```bash
+--dataset.root=/path/to/one_lerobot_dataset \
+--dataset.sidecar_path=/path/to/sidecar/framewise_guidance.parquet
+```
+
+这种模式下 stats 会从 parquet 同目录自动解析：未开启 `use_relative_actions` 时读取 `stats.json`，开启时优先读取 `stats_relative_action_chunk{N}_gap{G}.json`。如需完全手动指定，也可以使用 `dataset.stats_path` 或 `dataset.relative_stats_path` 覆盖。
+
+使用 canonical sidecar 训练时，sidecar 已经提供 22D/20D canonical state/action，因此需要关闭在线 canonicalize：
+
+```bash
+--policy.canonicalize_bimanual_rot6d=false \
+--policy.max_state_dim=22 \
+--policy.max_action_dim=20
+```
+
+如果训练开启：
+
+```bash
+--policy.use_relative_actions=true
+```
+
+混合训练时 action chunk 的有效 gap 按数据集类型决定：
+
+- UMI 数据：`robot_type` 为 `ugripper_left` / `ugripper_right` / `dual_ugripper`，使用全局 `policy.action_gap_frames`。
+- 真机数据：`robot_type=spark3_pose_gripper`，默认使用 `gap=0`，因为记录的 `state/action` 已经考虑了延时。
+- 如果显式传入 `policy.action_gap_dataset_overrides`，显式值优先。
+
+normalization stats 会使用与有效 gap 对齐的 relative action 口径：开启 `use_relative_actions` 时，加载器会优先读取与训练 `chunk_size` 和有效 action gap 一致的 `stats_relative_action_chunk{N}_gap{G}.json`，并只使用其中的 `observation.state` / `action` 作为 normalization stats。如果匹配文件不存在，会基于 `framewise_guidance.parquet` 动态计算 relative action stats，不会退回普通 `stats.json`。因此真机数据会使用 `gap=0` 的 relative stats 口径，UMI 数据会使用全局 gap 的 relative stats 口径。
+
+当前 sidecar 预处理默认只对左右手 xyz 做 relative action stats，rot6d 和 gripper 保持 absolute。训练参数需要与之匹配：
+
+```bash
+--policy.relative_exclude_joints='["gripper","rot6d"]'
+```
+
+当 sidecar stats 成功加载或动态计算完成时，pi05/pi05_full 会跳过训练启动阶段耗时的 `build_canonical_bimanual_stats` 全量扫描，直接使用 sidecar 口径的 stats，从而避免此前 `canonicalize_bimanual_rot6d=true + use_relative_actions=true` 启动很久的问题。
+
+### 18.3 示例脚本
+
+已更新：
+
+```text
+shfile/dsw_training101_pi05full_umi_groupA_18.5h.sh
+```
+
+脚本顶部可修改：
+
+```bash
+DATASET_ROOTS_FILE="/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/groupA_roots.txt"
+CANONICAL_SIDECAR_ROOT="/mnt/cpfs/repo/pi05_canonical_sidecars_groupA"
+```
+
+如果实际 sidecar 输出目录不同，只需要改 `CANONICAL_SIDECAR_ROOT`。
+
+### 18.4 当前 pi05_full 训练脚本注意事项
+
+当前 `shfile/dsw_training101_pi05full_umi_groupA_18.5h.sh` 是推荐的 groupA canonical sidecar 训练入口。脚本默认行为包括：
+
+- 使用 `/root/miniconda3/envs/lerobot_v0.5.1` 环境中的 `accelerate`
+- 使用 `scripts/groupA_roots.txt` 作为多数据集路径列表
+- 使用 `/mnt/cpfs/datasets/pi05_canonical_sidecars_umi` 作为默认 sidecar 根目录
+- 设置 `--policy.type=pi05_full`
+- 设置 `--policy.use_state_input=false`
+- 设置 `--policy.use_relative_actions=true`
+- 设置 `--policy.relative_exclude_joints='["gripper","rot6d"]'`
+- 设置 `--policy.canonicalize_bimanual_rot6d=false`
+- 设置 `--policy.max_state_dim=22`
+- 设置 `--policy.max_action_dim=20`
+
+脚本也做了两点运行稳定性处理：
+
+- 如果误用 `sh xxx.sh` 启动，会自动切回 `bash` 执行。
+- 日志会通过 `tee` 完整保存到 `logs/train/{JOB_NAME}.log`，默认非 resume 运行会先把已有同名日志移动成 `.bak`。
+
+当前不建议只通过命令行追加 `--policy.max_action_dim=32` 来切换 32D，因为脚本内部目前显式写了 `--policy.max_action_dim=20`，且 sidecar 的 action/stats 是 20D canonical 口径。如果未来要使用 32D，更稳妥的做法是单独实现“20D 有效 action + 12D padding + action mask=0 + 推理截回 20D”的完整适配，而不是只改一个参数。
+
+### 18.5 20D action 与 pi05_base 预训练权重加载
+
+`lerobot/pi05_base` 的 action head 是 32D：
+
+```text
+model.action_in_proj.weight: [1024, 32]
+model.action_out_proj.weight: [32, 1024]
+model.action_out_proj.bias: [32]
+```
+
+当前 canonical sidecar 使用 20D action，因此加载 `lerobot/pi05_base` 时这 3 个 action projection 参数会因为 shape 不一致被跳过并重新初始化。当前代码已经把这类 mismatch 处理为可接受的 warm-start 行为：
+
+- 兼容 shape 的预训练权重会正常加载
+- 仅跳过 `action_in_proj/action_out_proj` 这 3 个参数
+- 日志中看到 `Skipping 3 state dict keys with incompatible shapes` 属于预期
+- 日志中看到 `Compatible pretrained keys loaded successfully; shape-mismatched keys were reinitialized.` 表示加载状态正常
+
+这和 `/mnt/tacumi_data/tmp/lerobot_vtla_share` 中许多 `MAX_ACTION_DIM=20` 训练脚本的处理思路一致。当前优先建议沿用 20D 路线跑正式训练，先保证 sidecar、relative stats、mask、checkpoint 保存链路稳定。
+
+已完成一次 10 step smoke test：
+
+```text
+output_dir=/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/outputs/test_pi0.5fullsh
+log_file=/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/logs/train/test_pi0.5fullsh.log
+```
+
+验证结果：
+
+- `dataset.num_frames=1796744`
+- `dataset.num_episodes=2047`
+- sidecar relative stats 可动态计算
+- 预训练权重除 3 个 action projection 外正常加载
+- `train_exit=0`
+- checkpoint 保存到 `checkpoints/000010`

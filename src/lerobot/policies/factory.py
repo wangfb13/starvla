@@ -601,6 +601,12 @@ def make_policy(
         if hasattr(cfg, "source_state_feature_names"):
             cfg.source_state_feature_names = list(state_names) if state_names is not None else None
 
+        sidecar_canonical_loaded = bool(getattr(ds_meta, "sidecar_stats_loaded", False)) and (
+            tuple(ds_meta.features.get(ACTION, {}).get("shape", ())) == (getattr(cfg, "canonical_action_dim", -1),)
+            and tuple(ds_meta.features.get(OBS_STATE, {}).get("shape", ()))
+            == (getattr(cfg, "canonical_state_dim", -1),)
+        )
+
         if getattr(cfg, "canonicalize_bimanual_rot6d", False):
             if isinstance(cfg, PI05FullConfig):
                 from lerobot.policies.pi05_full.canonical_bimanual import (
@@ -628,6 +634,21 @@ def make_policy(
                 cfg.relative_exclude_joints = extend_relative_exclude_joints(
                     getattr(cfg, "relative_exclude_joints", [])
                 )
+        elif sidecar_canonical_loaded and cfg.type in {"pi05", "pi05_full"}:
+            if isinstance(cfg, PI05FullConfig):
+                from lerobot.policies.pi05_full.canonical_bimanual import (
+                    canonical_action_feature_names,
+                    canonical_state_feature_names,
+                )
+            else:
+                from lerobot.policies.pi05.canonical_bimanual import (
+                    canonical_action_feature_names,
+                    canonical_state_feature_names,
+                )
+
+            cfg.action_feature_names = canonical_action_feature_names()
+            if hasattr(cfg, "state_feature_names"):
+                cfg.state_feature_names = canonical_state_feature_names()
         elif hasattr(cfg, "action_feature_names"):
             cfg.action_feature_names = list(action_names) if action_names is not None else None
             if hasattr(cfg, "state_feature_names"):
