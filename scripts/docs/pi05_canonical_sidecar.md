@@ -39,7 +39,7 @@ episode's first valid state pose frame:
 
 - position is expressed in the episode anchor coordinate frame.
 - quaternion is converted to relative rotation and stored as rot6d.
-- gripper remains absolute.
+- gripper is stored as a framewise continuous value; training can convert it to chunk-relative.
 
 In real-robot mode, pose state and action stay in the dataset
 coordinate frame, but quaternion is still converted to rot6d and packed into the same
@@ -147,14 +147,24 @@ automatically sampled and normalized with `gap=0` because their recorded state/a
 already include the control delay. Explicit `policy.action_gap_dataset_overrides` entries
 still take precedence over this automatic inference.
 
-The default `--relative-action-keyframes 0:3,10:13` matches canonical left/right xyz.
-It keeps rot6d and gripper absolute, which mirrors the current `pi05_full` behavior when
-canonicalization excludes `rot6d` and the config excludes `gripper`. Use the matching training
-argument:
+The default `--relative-action-keyframes 0:3,10:13` matches canonical left/right
+`xyz + rot6d` blocks. Training uses an SE(3)-aware transform for those keyframes:
+`rel_pos = R_state^T @ (target_pos - state_pos)` and `rel_rot = R_state^T @ R_target`.
+This replaces the old scalar subtraction behavior for rot6d. Gripper is outside the
+keyframes and, with an empty exclude list, is trained as a continuous chunk-relative
+value (`action_gripper - state_gripper`). Use the matching training arguments:
 
 ```bash
---policy.relative_exclude_joints='["gripper","rot6d"]'
+--policy.relative_action_keyframes='["0:3","10:13"]'
+--policy.relative_exclude_joints='[]'
 ```
+
+If you need absolute gripper targets for an ablation, override
+`RELATIVE_EXCLUDE_JOINTS='["gripper"]'`.
+
+When `relative_action_keyframes` is non-empty, the training loader dynamically computes
+relative stats from `framewise_guidance.parquet` so it cannot silently reuse older
+`stats_relative_action_chunk{N}_gap{G}.json` files produced with scalar rot6d subtraction.
 
 When sidecar stats are loaded, `pi05`/`pi05_full` skip the slow dynamic
 `build_canonical_bimanual_stats` pass and use the precomputed sidecar stats for

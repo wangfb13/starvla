@@ -58,9 +58,22 @@
 - 训练前不一定必须手工执行 `recompute_stats`
 - 但如果你希望磁盘上的 `meta/stats.json` 本身就是 canonical/relative 口径，仍然可以离线重算
 
-### 2.3 rot6d 在相对动作中默认排除
+### 2.3 rot6d / gripper 的 chunk relative 口径
 
-在 `canonicalize_bimanual_rot6d=true` 时，工程会自动把 `rot6d` 加入 `relative_exclude_joints`。
+当前推荐训练脚本已经启用 `relative_action_keyframes='["0:3","10:13"]'`，canonical `xyz + rot6d` block 会先走 SE(3)-aware relative：
+
+```text
+rel_pos = R_state^T @ (target_pos - state_pos)
+rel_rot = R_state^T @ R_target
+```
+
+`gripper` 不在 keyframe 内，默认通过普通 chunk relative 处理，也就是连续量 `action_gripper - state_gripper`。如果希望夹爪保持 absolute，可以在启动脚本中覆盖：
+
+```bash
+RELATIVE_EXCLUDE_JOINTS='["gripper"]'
+```
+
+在 `canonicalize_bimanual_rot6d=true` 的旧在线 canonicalize 路径中，工程仍会自动把 `rot6d` 加入 `relative_exclude_joints`，这是为了防止没有设置 keyframes 时误用逐维 `rot6d_action - rot6d_state`。
 
 关键位置：
 
@@ -68,13 +81,13 @@
 - `src/lerobot/policies/pi05/canonical_bimanual.py::extend_relative_exclude_joints`
 - `src/lerobot/processor/relative_action_processor.py`
 
-当前默认行为：
+当前推荐脚本行为：
 
-- `x/y/z` 走 relative
-- `rot6d` 保持 absolute
-- `gripper` 保持 absolute
+- `xyz + rot6d` 走 SE(3)-aware chunk relative
+- `gripper` 走普通连续量 chunk relative
+- `relative_exclude_joints=[]`
 
-这是刻意设计，不是偶然结果。原因是当前 relative processor 只支持逐维 `action - state`，这适合位置，不适合 `rot6d` 这种旋转流形表示。
+这样既避免了 `rot6d` 的错误逐维相减，又能让所有 action 维度参与 chunk relative 训练。
 
 ### 2.4 PI05 的 state 输入现已可配置
 
@@ -332,24 +345,28 @@
 
 典型训练脚本见：
 
-- `shfile/dlc_torchrun_train_pi05.sh`
-- `shfile/dsw_train_pi05.sh`
+- `shfile/dsw_train_pi05.sh`：旧在线 canonical pi05 训练入口。
+- `shfile/dsw_training101_pi05_umi_groupA_18.5h.sh`：当前 sidecar pi05 训练入口。
+- `shfile/dlc_torchrun_train_pi05full.sh`：当前 DLC 多机 sidecar pi05_full 训练入口。
 
 当前推荐关键参数：
 
 ```bash
 --policy.type=pi05
 --policy.use_relative_actions=true
---policy.relative_exclude_joints='["gripper"]'
+--policy.relative_action_keyframes='["0:3","10:13"]'
+--policy.relative_exclude_joints='[]'
 --policy.canonicalize_bimanual_rot6d=true
 --policy.canonical_missing_value=9930.0
 ```
 
 注意：
 
-- 虽然脚本里只显式写了 `["gripper"]`
-- 只要 `canonicalize_bimanual_rot6d=true`
-- 代码会自动把 `rot6d` 也加入排除列表
+- 虽然脚本里显式写了 `relative_exclude_joints=[]`
+- `relative_action_keyframes` 会先处理 canonical `xyz + rot6d`
+- 代码仍保留自动把 `rot6d` 加入排除列表的保护逻辑
+- keyframe dims 会优先按 SE(3) relative 处理，不会回到逐维相减
+- `gripper` 默认不排除，因此会作为连续量做 chunk relative
 - 上面这条推荐配置默认仍然需要 `observation.state`
 - 即使你额外设置 `--policy.use_state_input=false`，只要 relative/canonical 任一开着，当前实现里也不能把 `observation.state` 从数据里彻底去掉
 
@@ -448,21 +465,22 @@
 
 ## 7. rot6d 在 relative action 中应使用 absolute 还是 relative
 
-当前建议：`rot6d` 用 `absolute`。
+当前建议：`rot6d` 用 SE(3)-aware relative，不要做逐维相减。
 
 原因：
 
-- 当前 relative processor 的实现是逐维减法
+- 普通 relative processor 的实现是逐维减法
 - `rot6d` 不是欧式位置向量
 - 直接做 `rot6d_action - rot6d_state` 不等价于真实相对旋转
+- 现在已经增加 `relative_action_keyframes`，可以对 `xyz + rot6d` block 做真实相对位姿变换
 
 所以当前工程的正确做法是：
 
-- 平移 `xyz` 使用 relative
-- 旋转 `rot6d` 使用 absolute
-- `gripper` 使用 absolute
+- 平移 `xyz` 使用 SE(3)-aware relative
+- 旋转 `rot6d` 使用 SE(3)-aware relative
+- `gripper` 默认使用普通连续量 relative
 
-如果后续确实要让旋转也使用“相对表示”，应新增专门的旋转相对 processor，而不是复用现有逐维减法。
+关键是必须通过 `relative_action_keyframes` 指定 `xyz + rot6d` block，不能让 `rot6d` 复用旧的逐维减法。
 
 ## 8. 数据集改相机模态时的建议
 
@@ -567,11 +585,11 @@
 具体兼容点：
 
 - canonical rot6d stats 重算现在会遍历所有子数据集，而不是只假设存在单个 `dataset.hf_dataset`
-- `rot6d` 自动加入 `relative_exclude_joints` 的逻辑没有改
-- 也就是说当前仍然是：
-  - `xyz` relative
-  - `rot6d` absolute
-  - `gripper` absolute
+- `rot6d` 自动加入 `relative_exclude_joints` 的保护逻辑仍保留
+- 推荐脚本会额外设置 `relative_action_keyframes='["0:3","10:13"]'`
+- 当前推荐口径是：
+  - `xyz + rot6d` 走 SE(3)-aware relative
+  - `gripper` 走普通连续量 relative
 
 ### 11.4 当前限制
 
@@ -755,7 +773,7 @@ all tactile batch_shape=(3, 3, 96, 128)
 - 每只手 10D 为 `xyz + rot6d(6) + gripper`。
 - `state_mask` / `action_valid_mask` 会在加载时映射成 `observation.state_mask` / `observation.action_mask`，用于 pi05/pi05_full mask step。
 
-UMI 数据在预处理阶段会先按每个 episode 第一帧有效 state pose 做相对位姿，再转成 rot6d；真机数据保持原始坐标系，只做 canonical + quat 转 rot6d。
+UMI 数据在预处理阶段会先按每个 episode 第一帧有效 state pose 做相对位姿，再转成 rot6d；同时会对 UMI 原始 state/action gripper 先裁剪到 `[-0.436, 0.0]`，再统一除以 `-0.436` 归一化到 `[0, 1]`，也就是 `0 -> 0`、`-0.436 -> 1`。真机数据保持原始坐标系，只做 canonical + quat 转 rot6d，gripper 也保持原始 framewise 数值。
 
 ### 18.2 训练参数
 
@@ -799,11 +817,21 @@ UMI 数据在预处理阶段会先按每个 episode 第一帧有效 state pose �
 
 normalization stats 会使用与有效 gap 对齐的 relative action 口径：开启 `use_relative_actions` 时，加载器会优先读取与训练 `chunk_size` 和有效 action gap 一致的 `stats_relative_action_chunk{N}_gap{G}.json`，并只使用其中的 `observation.state` / `action` 作为 normalization stats。如果匹配文件不存在，会基于 `framewise_guidance.parquet` 动态计算 relative action stats，不会退回普通 `stats.json`。因此真机数据会使用 `gap=0` 的 relative stats 口径，UMI 数据会使用全局 gap 的 relative stats 口径。
 
-当前 sidecar 预处理默认只对左右手 xyz 做 relative action stats，rot6d 和 gripper 保持 absolute。训练参数需要与之匹配：
+当前 sidecar canonical 训练默认使用 SE(3)-aware relative action keyframes：
 
 ```bash
---policy.relative_exclude_joints='["gripper","rot6d"]'
+--policy.relative_action_keyframes='["0:3","10:13"]'
+--policy.relative_exclude_joints='[]'
 ```
+
+其中 `0:3` 表示左手 `xyz` 从 0 开始、`rot6d` 从 3 开始，`10:13` 表示右手 `xyz` 从 10 开始、`rot6d` 从 13 开始。keyframe 内部会做：
+
+```text
+rel_pos = R_state^T @ (target_pos - state_pos)
+rel_rot = R_state^T @ R_target
+```
+
+因此 `rot6d` 不再走旧的逐维相减；`gripper` 不在 keyframe 内，默认通过 `relative_exclude_joints=[]` 进入普通连续量 chunk relative。如果要让夹爪保持 absolute，可手动覆盖 `RELATIVE_EXCLUDE_JOINTS='["gripper"]'`。
 
 当 sidecar stats 成功加载或动态计算完成时，pi05/pi05_full 会跳过训练启动阶段耗时的 `build_canonical_bimanual_stats` 全量扫描，直接使用 sidecar 口径的 stats，从而避免此前 `canonicalize_bimanual_rot6d=true + use_relative_actions=true` 启动很久的问题。
 
@@ -813,6 +841,7 @@ normalization stats 会使用与有效 gap 对齐的 relative action 口径：�
 
 ```text
 shfile/dsw_training101_pi05full_umi_groupA_18.5h.sh
+shfile/dsw_training101_pi05_umi_groupA_18.5h.sh
 ```
 
 脚本顶部可修改：
@@ -824,17 +853,40 @@ CANONICAL_SIDECAR_ROOT="/mnt/cpfs/repo/pi05_canonical_sidecars_groupA"
 
 如果实际 sidecar 输出目录不同，只需要改 `CANONICAL_SIDECAR_ROOT`。
 
-### 18.4 当前 pi05_full 训练脚本注意事项
+`pi05` 版本和 `pi05_full` 版本使用同一套 canonical sidecar 数据入口：
 
-当前 `shfile/dsw_training101_pi05full_umi_groupA_18.5h.sh` 是推荐的 groupA canonical sidecar 训练入口。脚本默认行为包括：
+```bash
+bash shfile/dsw_training101_pi05_umi_groupA_18.5h.sh
+```
+
+它会读取：
+
+```bash
+--dataset.roots_file="${ROOT_DIR}/scripts/groupA_roots.txt"
+--dataset.sidecar_root="/mnt/cpfs/datasets/pi05_canonical_sidecars_umi"
+--policy.type=pi05
+```
+
+sidecar 中的 `observation.state` / `action` / mask 会覆盖原始数据中的 state/action，维度仍然是 22D state 和 20D action。`pi05_full` 使用 sidecar 的子任务/文本增强字段；`pi05` 可以忽略这些额外字段，继续走自己的 task prompt + action flow 训练路径。
+
+### 18.4 当前 pi05/pi05_full sidecar 训练脚本注意事项
+
+当前推荐的 groupA canonical sidecar 训练入口包括：
+
+- `shfile/dsw_training101_pi05full_umi_groupA_18.5h.sh`
+- `shfile/dsw_training101_pi05_umi_groupA_18.5h.sh`
+- `shfile/dlc_torchrun_train_pi05full.sh`
+
+脚本默认行为包括：
 
 - 使用 `/root/miniconda3/envs/lerobot_v0.5.1` 环境中的 `accelerate`
 - 使用 `scripts/groupA_roots.txt` 作为多数据集路径列表
 - 使用 `/mnt/cpfs/datasets/pi05_canonical_sidecars_umi` 作为默认 sidecar 根目录
-- 设置 `--policy.type=pi05_full`
+- 设置 `--policy.type=pi05_full` 或 `--policy.type=pi05`
 - 设置 `--policy.use_state_input=false`
 - 设置 `--policy.use_relative_actions=true`
-- 设置 `--policy.relative_exclude_joints='["gripper","rot6d"]'`
+- 设置 `--policy.relative_action_keyframes='["0:3","10:13"]'`
+- 设置 `--policy.relative_exclude_joints='[]'`
 - 设置 `--policy.canonicalize_bimanual_rot6d=false`
 - 设置 `--policy.max_state_dim=22`
 - 设置 `--policy.max_action_dim=20`
@@ -843,6 +895,8 @@ CANONICAL_SIDECAR_ROOT="/mnt/cpfs/repo/pi05_canonical_sidecars_groupA"
 
 - 如果误用 `sh xxx.sh` 启动，会自动切回 `bash` 执行。
 - 日志会通过 `tee` 完整保存到 `logs/train/{JOB_NAME}.log`，默认非 resume 运行会先把已有同名日志移动成 `.bak`。
+
+DLC 多机脚本不再在脚本内部为 `NPROC_PER_NODE` / `WORLD_SIZE` / `RANK` / `MASTER_ADDR` / `MASTER_PORT` 设置本地 fallback。这些变量必须由 DLC 平台注入；如果缺失，脚本会在启动 `torchrun` 前直接报错退出，避免变量缺失时静默降级成单机或错误拓扑。本地 smoke test 请改用 DSW 单机脚本，或显式 export 这些变量后再运行。
 
 当前不建议只通过命令行追加 `--policy.max_action_dim=32` 来切换 32D，因为脚本内部目前显式写了 `--policy.max_action_dim=20`，且 sidecar 的 action/stats 是 20D canonical 口径。如果未来要使用 32D，更稳妥的做法是单独实现“20D 有效 action + 12D padding + action mask=0 + 推理截回 20D”的完整适配，而不是只改一个参数。
 

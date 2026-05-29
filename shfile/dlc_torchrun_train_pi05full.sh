@@ -22,11 +22,14 @@ if [[ -n "${CONDA_PREFIX:-}" ]]; then
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 fi
 
-NPROC_PER_NODE="${NPROC_PER_NODE:?NPROC_PER_NODE is required, e.g. 8}"
-WORLD_SIZE="${WORLD_SIZE:?WORLD_SIZE is required, e.g. 2 for two nodes}"
-RANK="${RANK:?RANK is required, 0-based node rank}"
-MASTER_ADDR="${MASTER_ADDR:?MASTER_ADDR is required, usually rank-0 host/IP}"
-MASTER_PORT="${MASTER_PORT:?MASTER_PORT is required, e.g. 29500}"
+# DLC injects these distributed variables. Do not set local fallbacks here,
+# otherwise a missing cloud variable could silently turn a multi-node job into
+# a single-node launch.
+: "${NPROC_PER_NODE:?DLC must set NPROC_PER_NODE}"
+: "${WORLD_SIZE:?DLC must set WORLD_SIZE}"
+: "${RANK:?DLC must set RANK}"
+: "${MASTER_ADDR:?DLC must set MASTER_ADDR}"
+: "${MASTER_PORT:?DLC must set MASTER_PORT}"
 
 CONFIG_PATH="${CONFIG_PATH:-}"
 RESUME_IF_POSSIBLE="${RESUME_IF_POSSIBLE:-0}"
@@ -52,7 +55,9 @@ SAVE_FREQ="${SAVE_FREQ:-5000}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
 
 ACTION_GAP_FRAMES="${ACTION_GAP_FRAMES:-6}"
-RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[\"gripper\",\"rot6d\"]}"
+RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
+RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
+RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
 NORMALIZATION_MAPPING="${NORMALIZATION_MAPPING:-}"
 
 mkdir -p "${LOG_DIR}"
@@ -118,6 +123,9 @@ echo "[info] tokenizer_name=${TOKENIZER_NAME}"
 echo "[info] batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS}"
 echo "[info] steps=${MAX_STEPS} save_freq=${SAVE_FREQ} eval_freq=${EVAL_FREQ}"
 echo "[info] action_gap_frames=${ACTION_GAP_FRAMES}"
+echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
+echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
+echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
 echo "[info] normalization_mapping=${NORMALIZATION_MAPPING:-<default>}"
 echo "[info] output_dir=${OUT_DIR}"
 echo "[info] log_file=${LOG_FILE}"
@@ -147,6 +155,8 @@ torchrun \
     --policy.device=cuda \
     --policy.tokenizer_name="${TOKENIZER_NAME}" \
     --policy.use_relative_actions=true \
+    --policy.relative_action_keyframes="${RELATIVE_ACTION_KEYFRAMES}" \
+    --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
     --policy.relative_exclude_joints="${RELATIVE_EXCLUDE_JOINTS}" \
     --policy.action_gap_frames="${ACTION_GAP_FRAMES}" \
     --policy.canonicalize_bimanual_rot6d=false \

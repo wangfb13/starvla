@@ -47,6 +47,9 @@ SUBTASK_EPISODE_PATTERN = re.compile(r"_ep(\d+)_")
 DEFAULT_SCHEMA_NAME = "pi05_canonical_bimanual_rot6d_v1"
 REAL_ROBOT_TYPES = {"spark3_pose_gripper"}
 UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper"}
+UMI_GRIPPER_RAW_MIN = -0.436
+UMI_GRIPPER_RAW_MAX = 0.0
+UMI_GRIPPER_NORMALIZATION_DENOMINATOR = -0.436
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,6 +122,14 @@ def parse_args() -> argparse.Namespace:
         "--relative-action-keyframes",
         default="0:3,10:13",
         help="Comma-separated action slices converted by relative stats, e.g. `0:3,10:13`.",
+    )
+    parser.add_argument(
+        "--relative-exclude-joints",
+        default="",
+        help=(
+            "Comma-separated action-name tokens to keep absolute when writing optional relative stats. "
+            "Default is empty, so non-keyframe dims such as gripper are also chunk-relative."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -230,6 +241,19 @@ def take_columns(
             values[use, out_idx] = column[use]
         valid[:, out_idx] = use
     return values, valid
+
+
+def normalize_umi_gripper(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    normalized = np.asarray(values, dtype=np.float32).copy()
+    use = np.asarray(valid, dtype=bool)
+    normalized[use] = (
+        np.clip(normalized[use], UMI_GRIPPER_RAW_MIN, UMI_GRIPPER_RAW_MAX)
+        / UMI_GRIPPER_NORMALIZATION_DENOMINATOR
+    )
+    normalized[use] = np.clip(normalized[use], 0.0, 1.0)
+    normalized[use] = normalized[use] + 0.0
+    normalized[~use] = 0.0
+    return normalized.astype(np.float32)
 
 
 def quat_to_matrix(quat_xyzw: np.ndarray) -> np.ndarray:
@@ -403,6 +427,8 @@ def build_state_action_from_raw(
                 pose_valid=pose_action_valid,
                 anchor_by_episode=anchor_by_episode,
             )
+            grip_state = normalize_umi_gripper(grip_state, grip_state_valid)
+            grip_action = normalize_umi_gripper(grip_action, grip_action_valid)
             arm_anchor_counts[arm] = len(anchor_by_episode)
         else:
             compact_state_pose, compact_state_pose_valid = build_pose_absolute_rot6d(
@@ -629,20 +655,87 @@ def compute_framewise_stats(canonical: dict[str, np.ndarray], base_stats: dict[s
     return stats
 
 
-def parse_slices(spec: str, dim: int) -> np.ndarray:
-    mask = np.zeros((dim,), dtype=np.float32)
+def parse_relative_action_keyframes(spec: str) -> list[tuple[int, int]]:
+    keyframes: list[tuple[int, int]] = []
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
         if ":" in part:
-            start_str, end_str = part.split(":", 1)
-            start = int(start_str)
-            end = int(end_str)
-            mask[start:end] = 1.0
+            pos_start_str, rot_start_str = part.split(":", 1)
+            keyframes.append((int(pos_start_str), int(rot_start_str)))
         else:
-            mask[int(part)] = 1.0
+            raise ValueError(
+                f"Invalid --relative-action-keyframes entry '{part}'. Expected `pos_start:rot6d_start`."
+            )
+    return keyframes
+
+
+def parse_csv_tokens(spec: str) -> list[str]:
+    return [part.strip() for part in spec.split(",") if part.strip()]
+
+
+def relative_mask_from_action_names(action_names: list[str], exclude_joints: list[str]) -> np.ndarray:
+    exclude_tokens = [token.lower() for token in exclude_joints if token]
+    if not exclude_tokens:
+        return np.ones(len(action_names), dtype=np.float32)
+    mask = np.ones(len(action_names), dtype=np.float32)
+    for idx, name in enumerate(action_names):
+        action_name = str(name).lower()
+        if any(token == action_name or token in action_name for token in exclude_tokens):
+            mask[idx] = 0.0
     return mask
+
+
+def rot6d_to_matrix_np(rot6d: np.ndarray) -> np.ndarray:
+    rot6d = np.asarray(rot6d, dtype=np.float32)
+    col1 = rot6d[..., 0:3]
+    col2 = rot6d[..., 3:6]
+    basis1 = col1 / np.clip(np.linalg.norm(col1, axis=-1, keepdims=True), 1e-8, None)
+    proj = np.sum(basis1 * col2, axis=-1, keepdims=True) * basis1
+    basis2_raw = col2 - proj
+    basis2 = basis2_raw / np.clip(np.linalg.norm(basis2_raw, axis=-1, keepdims=True), 1e-8, None)
+    basis3 = np.cross(basis1, basis2, axis=-1)
+    return np.stack((basis1, basis2, basis3), axis=-1).astype(np.float32)
+
+
+def apply_keyframe_relative_actions(
+    chunk_actions: np.ndarray,
+    state: np.ndarray,
+    keyframes: list[tuple[int, int]],
+) -> np.ndarray:
+    output = chunk_actions.copy()
+    if state.ndim == 1:
+        state_ref = state[None, :]
+    else:
+        state_ref = state
+    if output.ndim == 2:
+        output_seq = output[None, :, :]
+        squeeze_batch = True
+    else:
+        output_seq = output
+        squeeze_batch = False
+    for pos_start, rot_start in keyframes:
+        pos_slice = slice(pos_start, pos_start + 3)
+        rot_slice = slice(rot_start, rot_start + 6)
+        required_dim = max(pos_start + 3, rot_start + 6)
+        if output_seq.shape[-1] < required_dim or state_ref.shape[-1] < required_dim:
+            continue
+        current_pos = state_ref[:, pos_slice]
+        current_rot = rot6d_to_matrix_np(state_ref[:, rot_slice])
+        target_pos = output_seq[:, :, pos_slice]
+        target_rot = rot6d_to_matrix_np(output_seq[:, :, rot_slice])
+        current_rot_t = np.swapaxes(current_rot, -1, -2)
+        rel_pos = np.matmul(current_rot_t[:, None, ...], (target_pos - current_pos[:, None, :])[..., None])
+        rel_rot = np.matmul(current_rot_t[:, None, ...], target_rot)
+        output_seq[:, :, pos_slice] = rel_pos.squeeze(-1)
+        output_seq[:, :, rot_slice] = np.concatenate(
+            [rel_rot[..., :, 0], rel_rot[..., :, 1]],
+            axis=-1,
+        ).astype(np.float32)
+    if squeeze_batch:
+        return output_seq[0]
+    return output_seq
 
 
 def compute_relative_action_chunk_stats(
@@ -653,7 +746,8 @@ def compute_relative_action_chunk_stats(
     action_valid_mask: np.ndarray,
     chunk_size: int,
     action_gap_frames: int,
-    relative_mask: np.ndarray,
+    relative_keyframes: list[tuple[int, int]],
+    relative_exclude_joints: list[str],
 ) -> dict[str, np.ndarray]:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -664,20 +758,36 @@ def compute_relative_action_chunk_stats(
     for idx, episode_id in enumerate(episode_ids):
         episode_last_index[int(episode_id)] = idx
 
+    episode_last_indices = np.asarray(
+        [episode_last_index[int(episode_id)] for episode_id in episode_ids],
+        dtype=np.int64,
+    )
     relative_values: list[np.ndarray] = []
     relative_valid: list[np.ndarray] = []
     total = len(actions)
-    for start_idx in range(total):
-        ep = int(episode_ids[start_idx])
-        ep_last_idx = episode_last_index[ep]
-        query_indices = start_idx + action_gap_frames + np.arange(chunk_size)
-        query_indices = np.minimum(query_indices, ep_last_idx)
+    block_size = 4096
+    chunk_offsets = np.arange(chunk_size, dtype=np.int64)
+    relative_mask = relative_mask_from_action_names(canonical_action_feature_names(), relative_exclude_joints)
+    for pos_start, rot_start in relative_keyframes:
+        relative_mask[pos_start : min(pos_start + 3, CANONICAL_ACTION_DIM)] = 0.0
+        relative_mask[rot_start : min(rot_start + 6, CANONICAL_ACTION_DIM)] = 0.0
+    for block_start in range(0, total, block_size):
+        block_end = min(block_start + block_size, total)
+        start_indices = np.arange(block_start, block_end, dtype=np.int64)
+        query_indices = start_indices[:, None] + action_gap_frames + chunk_offsets[None, :]
+        query_indices = np.minimum(query_indices, episode_last_indices[start_indices, None])
 
         chunk_actions = actions[query_indices].copy()
         chunk_masks = action_valid_mask[query_indices].copy()
-        chunk_actions -= states[start_idx, :CANONICAL_ACTION_DIM] * relative_mask
-        relative_values.append(chunk_actions)
-        relative_valid.append(chunk_masks)
+        chunk_actions = apply_keyframe_relative_actions(
+            chunk_actions,
+            states[start_indices, :CANONICAL_ACTION_DIM],
+            relative_keyframes,
+        )
+        mask_dim = min(CANONICAL_ACTION_DIM, states.shape[1], actions.shape[1])
+        chunk_actions[:, :, :mask_dim] -= states[start_indices, None, :mask_dim] * relative_mask[:mask_dim]
+        relative_values.append(chunk_actions.reshape(-1, CANONICAL_ACTION_DIM))
+        relative_valid.append(chunk_masks.reshape(-1, CANONICAL_ACTION_DIM))
 
     if not relative_values:
         raise RuntimeError("No relative action chunks were available for stats computation.")
@@ -726,6 +836,7 @@ def build_sidecar_for_dataset(
     relative_stats_chunk_size: int,
     relative_stats_action_gap_frames: int,
     relative_action_keyframes: str,
+    relative_exclude_joints: str,
     overwrite: bool,
 ) -> dict[str, Any]:
     info_path = dataset_root / "meta" / "info.json"
@@ -791,7 +902,8 @@ def build_sidecar_for_dataset(
     stats_to_write = deepcopy(framewise_stats)
     relative_stats_path = None
     if relative_stats_chunk_size > 0:
-        relative_mask = parse_slices(relative_action_keyframes, CANONICAL_ACTION_DIM)
+        relative_keyframes = parse_relative_action_keyframes(relative_action_keyframes)
+        relative_exclude_joint_tokens = parse_csv_tokens(relative_exclude_joints)
         relative_action_stats = compute_relative_action_chunk_stats(
             episode_ids=frame_df["episode_index"].to_numpy(dtype=np.int64),
             states=canonical[OBS_STATE],
@@ -799,7 +911,8 @@ def build_sidecar_for_dataset(
             action_valid_mask=canonical["action_valid_mask"],
             chunk_size=relative_stats_chunk_size,
             action_gap_frames=relative_stats_action_gap_frames,
-            relative_mask=relative_mask,
+            relative_keyframes=relative_keyframes,
+            relative_exclude_joints=relative_exclude_joint_tokens,
         )
         relative_stats = deepcopy(framewise_stats)
         relative_stats[ACTION] = relative_action_stats
@@ -835,9 +948,10 @@ def build_sidecar_for_dataset(
         "canonical_state_names": canonical_state_feature_names(),
         "canonical_action_names": canonical_action_feature_names(),
         "state_pose_mode": "episode_anchor_relative_rot6d" if dataset_type == "umi" else "absolute_rot6d",
-        "action_target_mode": "episode_anchor_relative_rot6d_gripper_absolute"
+        "gripper_mode": "clip_raw_to_[-0.436,0.0]_divide_by_-0.436" if dataset_type == "umi" else "framewise_raw",
+        "action_target_mode": "episode_anchor_relative_rot6d_gripper_framewise"
         if dataset_type == "umi"
-        else "absolute_rot6d_gripper_absolute",
+        else "absolute_rot6d_gripper_framewise",
         "missing_value": missing_value,
         "left_arm_present_ratio": float(canonical["left_present"].mean()),
         "right_arm_present_ratio": float(canonical["right_present"].mean()),
@@ -854,8 +968,9 @@ def build_sidecar_for_dataset(
             "relative_action_keyframes": [
                 item.strip() for item in relative_action_keyframes.split(",") if item.strip()
             ],
+            "relative_exclude_joints": parse_csv_tokens(relative_exclude_joints),
             "action_gap_frames": relative_stats_action_gap_frames,
-            "use_state_input": True,
+            "use_state_input": False,
             "action_valid_mask_key": "action_valid_mask",
             "state_present_key": "state_present",
             "max_state_dim": CANONICAL_STATE_DIM,
@@ -901,6 +1016,7 @@ def main() -> None:
                 relative_stats_chunk_size=args.relative_stats_chunk_size,
                 relative_stats_action_gap_frames=args.relative_stats_action_gap_frames,
                 relative_action_keyframes=args.relative_action_keyframes,
+                relative_exclude_joints=args.relative_exclude_joints,
                 overwrite=args.overwrite,
             )
         )

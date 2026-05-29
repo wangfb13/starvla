@@ -39,7 +39,9 @@ SAVE_FREQ="${SAVE_FREQ:-5000}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
 
 ACTION_GAP_FRAMES="${ACTION_GAP_FRAMES:-6}"
-RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[\"gripper\",\"rot6d\"]}"
+RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
+RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
+RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
 USE_STATE_INPUT="${USE_STATE_INPUT:-false}"
 NORMALIZATION_MAPPING="${NORMALIZATION_MAPPING:-}"
 
@@ -111,6 +113,9 @@ echo "[info] gpu_count=${GPU_COUNT}"
 echo "[info] batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS}"
 echo "[info] steps=${MAX_STEPS} save_freq=${SAVE_FREQ} eval_freq=${EVAL_FREQ}"
 echo "[info] action_gap_frames=${ACTION_GAP_FRAMES}"
+echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
+echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
+echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
 echo "[info] use_state_input=${USE_STATE_INPUT}"
 echo "[info] normalization_mapping=${NORMALIZATION_MAPPING:-<default>}"
 echo "[info] output_dir=${OUT_DIR}"
@@ -138,6 +143,8 @@ timeout --signal=INT "${TRAIN_HOURS}h" \
     --policy.tokenizer_name="${TOKENIZER_NAME}" \
     --policy.use_relative_actions=true \
     --policy.use_state_input="${USE_STATE_INPUT}" \
+    --policy.relative_action_keyframes="${RELATIVE_ACTION_KEYFRAMES}" \
+    --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
     --policy.relative_exclude_joints="${RELATIVE_EXCLUDE_JOINTS}" \
     --policy.action_gap_frames="${ACTION_GAP_FRAMES}" \
     --policy.canonicalize_bimanual_rot6d=false \

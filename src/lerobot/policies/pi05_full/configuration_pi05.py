@@ -58,6 +58,10 @@ class PI05FullConfig(PreTrainedConfig):
 
     # Relative actions: converts absolute actions to relative (relative to state).
     use_relative_actions: bool = False
+    # Canonical xyz/rot6d blocks converted with SE(3)-aware relative actions.
+    # Each entry is "pos_start:rot6d_start"; canonical bimanual uses left=0:3, right=10:13.
+    relative_action_keyframes: list[str] = field(default_factory=list)
+    relative_exclude_keys: list[str] = field(default_factory=list)
     # Joint names to exclude from relative (kept absolute). Empty list = all dims relative.
     relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
     # Populated at runtime from dataset metadata by make_policy.

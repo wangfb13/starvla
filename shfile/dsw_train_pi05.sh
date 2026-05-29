@@ -22,7 +22,8 @@ python src/lerobot/scripts/lerobot_train.py \
     --policy.device=cuda \
     --policy.tokenizer_name=/mnt/tacumi_data/huggingface/paligemma-3b-pt-224 \
     --policy.use_relative_actions=true \
-    --policy.relative_exclude_joints='["gripper"]' \
+    --policy.relative_action_keyframes='["0:3","10:13"]' \
+    --policy.relative_exclude_joints='[]' \
     --policy.action_gap_frames=6 \
     --policy.canonicalize_bimanual_rot6d=true \
     --policy.canonical_missing_value=9930.0 \

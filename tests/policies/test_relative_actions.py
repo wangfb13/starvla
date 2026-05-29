@@ -18,6 +18,8 @@ from lerobot.processor.normalize_processor import NormalizerProcessorStep, Unnor
 from lerobot.processor.relative_action_processor import (
     AbsoluteActionsProcessorStep,
     RelativeActionsProcessorStep,
+    to_keyframe_absolute_actions,
+    to_keyframe_relative_actions,
     to_absolute_actions,
     to_relative_actions,
 )
@@ -101,6 +103,82 @@ def test_exclude_joints_supports_partial_name_matching():
     ]
     step = RelativeActionsProcessorStep(enabled=True, exclude_joints=["gripper"], action_names=names)
     assert step._build_mask(len(names)) == [True, False, True, False]
+
+
+def test_keyframe_rot6d_relative_roundtrip():
+    state = torch.tensor(
+        [
+            [
+                1.0,
+                2.0,
+                3.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.25,
+                -1.0,
+                -2.0,
+                -3.0,
+                0.0,
+                1.0,
+                0.0,
+                -1.0,
+                0.0,
+                0.0,
+                0.75,
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    actions = state[:, None, :].repeat(1, 2, 1)
+    actions[:, 0, 0:3] += torch.tensor([0.2, -0.1, 0.3])
+    actions[:, 1, 10:13] += torch.tensor([-0.4, 0.1, 0.2])
+
+    relative = to_keyframe_relative_actions(actions, state, ["0:3", "10:13"])
+    recovered = to_keyframe_absolute_actions(relative, state, ["0:3", "10:13"])
+
+    torch.testing.assert_close(recovered, actions, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(relative[..., 9], actions[..., 9])
+    torch.testing.assert_close(relative[..., 19], actions[..., 19])
+
+
+def test_processor_keyframes_do_not_apply_scalar_relative_to_rot6d_twice():
+    names = [
+        "left_x",
+        "left_y",
+        "left_z",
+        "left_rot6d_0",
+        "left_rot6d_1",
+        "left_rot6d_2",
+        "left_rot6d_3",
+        "left_rot6d_4",
+        "left_rot6d_5",
+        "gripper_left",
+    ]
+    state = torch.tensor([[1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.4]])
+    action = state[:, None, :].clone()
+    action[..., 0] += 0.5
+    transition = batch_to_transition({ACTION: action, OBS_STATE: state})
+
+    relative_step = RelativeActionsProcessorStep(
+        enabled=True,
+        exclude_joints=["gripper"],
+        action_names=names,
+        relative_action_keyframes=["0:3"],
+    )
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative_step)
+
+    relative_transition = relative_step(transition)
+    relative_action = relative_transition[TransitionKey.ACTION]
+    torch.testing.assert_close(relative_action[..., 0], torch.tensor([[0.5]]))
+    torch.testing.assert_close(relative_action[..., 3:9], state[:, None, 3:9])
+    torch.testing.assert_close(relative_action[..., 9], action[..., 9])
+
+    recovered = absolute_step(relative_transition)[TransitionKey.ACTION]
+    torch.testing.assert_close(recovered, action, atol=1e-5, rtol=1e-5)
 
 
 # Chunk-level relative stats test

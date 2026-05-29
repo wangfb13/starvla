@@ -164,6 +164,56 @@ def test_framewise_sidecar_dynamic_relative_action_chunk_stats(tmp_path):
     assert stats["count"].tolist() == [6.0]
 
 
+def test_framewise_sidecar_dynamic_keyframe_rot6d_relative_stats(tmp_path):
+    sidecar_path = tmp_path / "framewise_guidance.parquet"
+    identity_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    pd.DataFrame(
+        [
+            {
+                "index": 0,
+                "episode_index": 0,
+                OBS_STATE: np.array([1.0, 2.0, 3.0, *identity_rot6d, 0.4], dtype=np.float32),
+                ACTION: np.array([2.0, 4.0, 6.0, *identity_rot6d, 0.7], dtype=np.float32),
+                "action_valid_mask": np.ones(10, dtype=np.float32),
+            },
+            {
+                "index": 1,
+                "episode_index": 0,
+                OBS_STATE: np.array([2.0, 3.0, 4.0, *identity_rot6d, 0.5], dtype=np.float32),
+                ACTION: np.array([4.0, 7.0, 10.0, *identity_rot6d, 0.8], dtype=np.float32),
+                "action_valid_mask": np.ones(10, dtype=np.float32),
+            },
+        ]
+    ).to_parquet(sidecar_path, index=False)
+
+    stats = FramewiseSidecar(sidecar_path).relative_action_chunk_stats(
+        chunk_size=1,
+        action_gap_frames=0,
+        action_names=[
+            "left_x",
+            "left_y",
+            "left_z",
+            "left_rot6d_0",
+            "left_rot6d_1",
+            "left_rot6d_2",
+            "left_rot6d_3",
+            "left_rot6d_4",
+            "left_rot6d_5",
+            "gripper_left",
+        ],
+        relative_exclude_joints=["gripper"],
+        relative_action_keyframes=["0:3"],
+    )
+
+    assert stats is not None
+    assert stats["min"][:3].tolist() == [1.0, 2.0, 3.0]
+    assert stats["max"][:3].tolist() == [2.0, 4.0, 6.0]
+    assert stats["min"][3:9].tolist() == identity_rot6d.tolist()
+    assert stats["max"][3:9].tolist() == identity_rot6d.tolist()
+    assert stats["min"][9] == 0.7
+    assert stats["max"][9] == 0.8
+
+
 def test_framewise_sidecar_masked_vector_stats_uses_mask(tmp_path):
     sidecar_path = tmp_path / "framewise_guidance.parquet"
     pd.DataFrame(

@@ -289,6 +289,9 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
     relative_chunk_size = getattr(cfg.policy, "chunk_size", None)
     default_relative_action_gap_frames = getattr(cfg.policy, "action_gap_frames", None)
     relative_exclude_joints = getattr(cfg.policy, "relative_exclude_joints", None) or []
+    relative_action_keyframes = getattr(cfg.policy, "relative_action_keyframes", None) or []
+    relative_exclude_keys = getattr(cfg.policy, "relative_exclude_keys", None) or []
+    force_dynamic_relative_stats = use_relative_actions and bool(relative_action_keyframes)
 
     def _action_names_for_relative_stats(child_dataset) -> list[str] | None:
         action_names = getattr(cfg.policy, "action_feature_names", None)
@@ -350,6 +353,8 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
             action_gap_frames=int(gap_frames or 0),
             action_names=list(action_names),
             relative_exclude_joints=relative_exclude_joints,
+            relative_action_keyframes=list(relative_action_keyframes),
+            relative_exclude_keys=list(relative_exclude_keys),
         )
         state_names = _state_names_for_sidecar_stats(child_dataset)
         if state_names is None:
@@ -383,7 +388,7 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
                 relative_action_gap_frames=relative_action_gap_frames,
                 use_relative_actions=use_relative_actions,
             )
-            stats = load_stats_json(stats_path)
+            stats = None if force_dynamic_relative_stats else load_stats_json(stats_path)
             stats = filter_sidecar_normalization_stats(stats)
             if stats is None and use_relative_actions:
                 stats = _dynamic_relative_stats(child_dataset, relative_action_gap_frames)
@@ -417,7 +422,7 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
         relative_action_gap_frames=relative_action_gap_frames,
         use_relative_actions=use_relative_actions,
     )
-    stats = filter_sidecar_normalization_stats(load_stats_json(stats_path))
+    stats = None if force_dynamic_relative_stats else filter_sidecar_normalization_stats(load_stats_json(stats_path))
     if stats is None and use_relative_actions:
         stats = _dynamic_relative_stats(dataset, relative_action_gap_frames)
     if stats is None and use_relative_actions:

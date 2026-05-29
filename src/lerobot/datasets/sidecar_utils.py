@@ -231,6 +231,82 @@ def _relative_mask_from_action_names(action_dim: int, action_names: list[str], e
     return np.asarray(mask, dtype=np.float32)
 
 
+def _parse_relative_keyframe_spec(spec: str) -> tuple[int, int]:
+    parts = str(spec).split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid relative_action_keyframes entry '{spec}'. Expected 'pos_start:rot6d_start'.")
+    return int(parts[0]), int(parts[1])
+
+
+def _relative_keyframe_specs(
+    keyframes: list[str] | None,
+    exclude_keys: list[str] | None = None,
+) -> list[tuple[int, int]]:
+    excluded = {str(item) for item in (exclude_keys or [])}
+    specs: list[tuple[int, int]] = []
+    for spec in keyframes or []:
+        if str(spec) in excluded:
+            continue
+        specs.append(_parse_relative_keyframe_spec(str(spec)))
+    return specs
+
+
+def _rot6d_to_matrix_np(rot6d: np.ndarray) -> np.ndarray:
+    rot6d = np.asarray(rot6d, dtype=np.float32)
+    col1 = rot6d[..., 0:3]
+    col2 = rot6d[..., 3:6]
+    basis1 = col1 / np.clip(np.linalg.norm(col1, axis=-1, keepdims=True), 1e-8, None)
+    proj = np.sum(basis1 * col2, axis=-1, keepdims=True) * basis1
+    basis2_raw = col2 - proj
+    basis2 = basis2_raw / np.clip(np.linalg.norm(basis2_raw, axis=-1, keepdims=True), 1e-8, None)
+    basis3 = np.cross(basis1, basis2, axis=-1)
+    return np.stack((basis1, basis2, basis3), axis=-1).astype(np.float32)
+
+
+def _matrix_to_rot6d_np(rot_mats: np.ndarray) -> np.ndarray:
+    rot_mats = np.asarray(rot_mats, dtype=np.float32)
+    return np.concatenate((rot_mats[..., :, 0], rot_mats[..., :, 1]), axis=-1).astype(np.float32)
+
+
+def _apply_keyframe_relative_np(
+    chunk_actions: np.ndarray,
+    state: np.ndarray,
+    keyframe_specs: list[tuple[int, int]],
+) -> np.ndarray:
+    if not keyframe_specs:
+        return chunk_actions
+    output = chunk_actions.copy()
+    state = np.asarray(state, dtype=np.float32)
+    if state.ndim == 1:
+        state_ref = state[None, :]
+    else:
+        state_ref = state
+    if output.ndim == 2:
+        output_seq = output[None, :, :]
+        squeeze_batch = True
+    else:
+        output_seq = output
+        squeeze_batch = False
+    for pos_start, rot_start in keyframe_specs:
+        pos_slice = slice(pos_start, pos_start + 3)
+        rot_slice = slice(rot_start, rot_start + 6)
+        required_dim = max(pos_start + 3, rot_start + 6)
+        if output_seq.shape[-1] < required_dim or state_ref.shape[-1] < required_dim:
+            continue
+        current_pos = state_ref[:, pos_slice]
+        current_rot = _rot6d_to_matrix_np(state_ref[:, rot_slice])
+        target_pos = output_seq[:, :, pos_slice]
+        target_rot = _rot6d_to_matrix_np(output_seq[:, :, rot_slice])
+        current_rot_t = np.swapaxes(current_rot, -1, -2)
+        rel_pos = np.matmul(current_rot_t[:, None, ...], (target_pos - current_pos[:, None, :])[..., None])
+        rel_rot = np.matmul(current_rot_t[:, None, ...], target_rot)
+        output_seq[:, :, pos_slice] = rel_pos.squeeze(-1)
+        output_seq[:, :, rot_slice] = _matrix_to_rot6d_np(rel_rot)
+    if squeeze_batch:
+        return output_seq[0]
+    return output_seq
+
+
 def _default_value_for_series(series: pd.Series) -> object:
     dtype = series.dtype
     if pd.api.types.is_bool_dtype(dtype):
@@ -422,6 +498,8 @@ class FramewiseSidecar:
         action_gap_frames: int,
         action_names: list[str],
         relative_exclude_joints: list[str] | None = None,
+        relative_action_keyframes: list[str] | None = None,
+        relative_exclude_keys: list[str] | None = None,
     ) -> dict[str, np.ndarray] | None:
         self.ensure_loaded()
         if self._frame_df is None:
@@ -449,26 +527,37 @@ class FramewiseSidecar:
             action_names=action_names,
             exclude_joints=relative_exclude_joints or [],
         )
+        keyframe_specs = _relative_keyframe_specs(relative_action_keyframes, relative_exclude_keys)
+        for pos_start, rot_start in keyframe_specs:
+            relative_mask[pos_start : min(pos_start + 3, action_dim)] = 0.0
+            relative_mask[rot_start : min(rot_start + 6, action_dim)] = 0.0
         episode_ids = self._frame_df["episode_index"].to_numpy(dtype=np.int64)
         episode_last_index: dict[int, int] = {}
         for idx, episode_id in enumerate(episode_ids):
             episode_last_index[int(episode_id)] = idx
 
+        episode_last_indices = np.asarray(
+            [episode_last_index[int(episode_id)] for episode_id in episode_ids],
+            dtype=np.int64,
+        )
         relative_values: list[np.ndarray] = []
         relative_valid: list[np.ndarray] = []
         total = len(actions)
-        for start_idx in range(total):
-            ep = int(episode_ids[start_idx])
-            ep_last_idx = episode_last_index[ep]
-            query_indices = start_idx + int(action_gap_frames) + np.arange(int(chunk_size))
-            query_indices = np.minimum(query_indices, ep_last_idx)
+        block_size = 4096
+        chunk_offsets = np.arange(int(chunk_size), dtype=np.int64)
+        for block_start in range(0, total, block_size):
+            block_end = min(block_start + block_size, total)
+            start_indices = np.arange(block_start, block_end, dtype=np.int64)
+            query_indices = start_indices[:, None] + int(action_gap_frames) + chunk_offsets[None, :]
+            query_indices = np.minimum(query_indices, episode_last_indices[start_indices, None])
 
             chunk_actions = actions[query_indices].copy()
             chunk_masks = action_valid_mask[query_indices].copy()
+            chunk_actions = _apply_keyframe_relative_np(chunk_actions, states[start_indices], keyframe_specs)
             mask_dim = min(len(relative_mask), states.shape[1], action_dim)
-            chunk_actions[:, :mask_dim] -= states[start_idx, :mask_dim] * relative_mask[:mask_dim]
-            relative_values.append(chunk_actions)
-            relative_valid.append(chunk_masks)
+            chunk_actions[:, :, :mask_dim] -= states[start_indices, None, :mask_dim] * relative_mask[:mask_dim]
+            relative_values.append(chunk_actions.reshape(-1, action_dim))
+            relative_valid.append(chunk_masks.reshape(-1, action_dim))
 
         if not relative_values:
             return None
