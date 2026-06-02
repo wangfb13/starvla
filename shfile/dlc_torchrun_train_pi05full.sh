@@ -60,6 +60,7 @@ ACTION_GAP_FRAMES="${ACTION_GAP_FRAMES:-6}"
 RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
 RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
 RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
+USE_STATE_INPUT="${USE_STATE_INPUT:-false}"
 LOSS_WEIGHT_SUBTASK_CE="${LOSS_WEIGHT_SUBTASK_CE:-1.0}"
 NORMALIZATION_MAPPING="${NORMALIZATION_MAPPING:-}"
 
@@ -145,6 +146,7 @@ echo "[info] action_gap_frames=${ACTION_GAP_FRAMES}"
 echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
 echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
 echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
+echo "[info] use_state_input=${USE_STATE_INPUT}"
 echo "[info] loss_weight_subtask_ce=${LOSS_WEIGHT_SUBTASK_CE}"
 echo "[info] normalization_mapping=${NORMALIZATION_MAPPING:-<default>}"
 echo "[info] output_dir=${OUT_DIR}"
@@ -175,6 +177,7 @@ torchrun \
     --policy.device=cuda \
     --policy.tokenizer_name="${TOKENIZER_NAME}" \
     --policy.use_relative_actions=true \
+    --policy.use_state_input="${USE_STATE_INPUT}" \
     --policy.relative_action_keyframes="${RELATIVE_ACTION_KEYFRAMES}" \
     --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
     --policy.relative_exclude_joints="${RELATIVE_EXCLUDE_JOINTS}" \
