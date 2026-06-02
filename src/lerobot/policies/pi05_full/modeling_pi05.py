@@ -719,10 +719,14 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             )
         return func(*args, **kwargs)
 
-    def _prepare_attention_masks_4d(self, att_2d_masks):
+    def _prepare_attention_masks_4d(self, att_2d_masks, dtype: torch.dtype | None = None):
         """Helper method to prepare 4D attention masks for transformer."""
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
-        return torch.where(att_2d_masks_4d, 0.0, OPENPI_ATTENTION_MASK_VALUE)
+        if dtype is None:
+            dtype = torch.float32
+        zero = torch.tensor(0.0, dtype=dtype, device=att_2d_masks.device)
+        neg = torch.tensor(OPENPI_ATTENTION_MASK_VALUE, dtype=dtype, device=att_2d_masks.device)
+        return torch.where(att_2d_masks_4d, zero, neg)
 
     def sample_noise(self, shape, device):
         return torch.normal(
@@ -1104,7 +1108,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
         position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-        att_4d = self._prepare_attention_masks_4d(prefix_att_masks)
+        att_4d = self._prepare_attention_masks_4d(prefix_att_masks, dtype=prefix_embs.dtype)
 
         (prefix_out, _), past_key_values = self.paligemma_with_expert.forward(
             attention_mask=att_4d,
@@ -1139,7 +1143,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             new_column = torch.ones((bsize, 1), dtype=torch.bool, device=device)
             current_pad_mask = torch.cat([current_pad_mask, new_column], dim=1)
             current_position_ids = (torch.sum(current_pad_mask, dim=1, keepdim=True) - 1).long()
-            step_att_mask = self._prepare_attention_masks_4d(current_pad_mask.unsqueeze(1))
+            step_att_mask = self._prepare_attention_masks_4d(
+                current_pad_mask.unsqueeze(1), dtype=next_token_emb.dtype
+            )
 
             (step_out, _), past_key_values = self.paligemma_with_expert.forward(
                 attention_mask=step_att_mask,
@@ -1546,9 +1552,28 @@ class PI05FullPolicy(PreTrainedPolicy):
 
     def prepare_action_mask(self, batch):
         action_mask = batch.get(self.config.action_mask_observation_key, batch.get(OBS_ACTION_MASK))
+        sidecar_action_mask = batch.get("action_valid_mask")
+        if action_mask is None:
+            action_mask = sidecar_action_mask
+        elif sidecar_action_mask is not None and torch.is_tensor(action_mask) and torch.is_tensor(sidecar_action_mask):
+            if action_mask.sum() <= 0 and sidecar_action_mask.sum() > 0:
+                action_mask = sidecar_action_mask
         if action_mask is None:
             return None
         return pad_vector(action_mask, self.config.max_action_dim)
+
+    @staticmethod
+    def _debug_tensor_summary(batch: dict[str, Tensor], key: str) -> str:
+        value = batch.get(key)
+        if value is None:
+            return f"{key}=None"
+        if not torch.is_tensor(value):
+            return f"{key}=type({type(value).__name__})"
+        return (
+            f"{key}:shape={tuple(value.shape)} "
+            f"sum={float(value.float().sum().detach().cpu()):.3f} "
+            f"mean={float(value.float().mean().detach().cpu()):.3f}"
+        )
 
     @staticmethod
     def get_language_inputs(batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
@@ -1788,6 +1813,19 @@ class PI05FullPolicy(PreTrainedPolicy):
 
         actions = self.prepare_action(batch)
         action_mask = self.prepare_action_mask(batch)
+        if self.training and action_mask is None:
+            debug_keys = (
+                self.config.action_mask_observation_key,
+                OBS_ACTION_MASK,
+                "action_valid_mask",
+                ACTION,
+            )
+            debug_summary = "; ".join(self._debug_tensor_summary(batch, key) for key in debug_keys)
+            raise ValueError(
+                "PI05 full did not receive an action mask during training. "
+                "Masked pi05_full training requires observation.action_mask/action_valid_mask. "
+                f"Batch debug: {debug_summary}"
+            )
 
         model_outputs = self.model.forward(
             images,
@@ -1810,6 +1848,7 @@ class PI05FullPolicy(PreTrainedPolicy):
             expanded_action_mask = action_mask[..., :original_action_dim]
             if expanded_action_mask.ndim == 2:
                 expanded_action_mask = expanded_action_mask[:, None, :]
+            expanded_action_mask = expanded_action_mask.expand_as(losses)
 
         if expanded_action_mask is not None:
             per_dim_denom = expanded_action_mask.sum(dim=[0, 1]).clamp_min(1.0)
@@ -1822,6 +1861,9 @@ class PI05FullPolicy(PreTrainedPolicy):
             "loss_per_dim": loss_per_dim.detach().cpu().numpy().tolist(),
             "subtask_ce_loss": subtask_ce_loss.item(),
         }
+        if expanded_action_mask is not None:
+            loss_dict["action_mask_mean"] = expanded_action_mask.float().mean().item()
+            loss_dict["action_mask_sum"] = expanded_action_mask.float().sum().item()
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
@@ -1837,7 +1879,22 @@ class PI05FullPolicy(PreTrainedPolicy):
         else:
             # Default: return scalar mean loss
             if expanded_action_mask is not None:
-                flow_loss = losses.sum() / expanded_action_mask.sum().clamp_min(1.0)
+                mask_sum = expanded_action_mask.sum()
+                if self.training and mask_sum <= 0:
+                    debug_keys = (
+                        self.config.action_mask_observation_key,
+                        OBS_ACTION_MASK,
+                        "action_valid_mask",
+                        ACTION,
+                    )
+                    debug_summary = "; ".join(self._debug_tensor_summary(batch, key) for key in debug_keys)
+                    raise ValueError(
+                        "PI05 full received an all-zero action mask during training; "
+                        "flow loss would be fully masked out. Check observation.action_mask/action_valid_mask "
+                        "in the dataset sidecar and preprocessing pipeline. "
+                        f"Batch debug: {debug_summary}"
+                    )
+                flow_loss = losses.sum() / mask_sum.clamp_min(1.0)
             else:
                 flow_loss = losses.mean()
             loss = flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss

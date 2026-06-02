@@ -70,6 +70,16 @@ def _broadcast_feature_mask(mask: torch.Tensor, target: torch.Tensor) -> torch.T
 def pi05_full_batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
     """Preserve pi05_full-specific complementary fields that the generic batch converter drops."""
     transition = batch_to_transition(batch)
+    observation = dict(transition.get(TransitionKey.OBSERVATION, {}) or {})
+    if "action_valid_mask" in batch:
+        observation[OBS_ACTION_MASK] = batch["action_valid_mask"]
+    if OBS_ACTION_MASK in batch:
+        observation[OBS_ACTION_MASK] = batch[OBS_ACTION_MASK]
+    if "state_mask" in batch:
+        observation[OBS_STATE_MASK] = batch["state_mask"]
+    if OBS_STATE_MASK in batch:
+        observation[OBS_STATE_MASK] = batch[OBS_STATE_MASK]
+    transition[TransitionKey.OBSERVATION] = observation
     complementary_data = dict(transition.get(TransitionKey.COMPLEMENTARY_DATA, {}) or {})
     for key in (
         "user_prompt",

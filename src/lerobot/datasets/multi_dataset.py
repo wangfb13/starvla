@@ -443,6 +443,8 @@ class MultiLeRobotDatasetMetadata:
                 "subtask_text_sidecar",
                 "next_subtask_text_sidecar",
                 "dataset_index",
+                "action_valid_mask",
+                "state_mask",
                 OBS_ACTION_MASK,
                 OBS_STATE_MASK,
             }:
@@ -453,6 +455,16 @@ class MultiLeRobotDatasetMetadata:
         for key, default_value in self.extra_complementary_defaults.items():
             if key not in canonical:
                 canonical[key] = default_value.clone() if torch.is_tensor(default_value) else default_value
+
+        if "action_valid_mask" in canonical:
+            canonical[OBS_ACTION_MASK] = canonical["action_valid_mask"]
+        elif OBS_ACTION_MASK in canonical:
+            canonical["action_valid_mask"] = canonical[OBS_ACTION_MASK]
+
+        if "state_mask" in canonical:
+            canonical[OBS_STATE_MASK] = canonical["state_mask"]
+        elif OBS_STATE_MASK in canonical:
+            canonical["state_mask"] = canonical[OBS_STATE_MASK]
 
         # Keep language-side complementary keys structurally stable so the default
         # DataLoader collate_fn does not fail when some frames lack subtask annotations.
@@ -625,10 +637,15 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
     def _resolve_extra_complementary_defaults(self) -> dict[str, object]:
         defaults: dict[str, object] = {}
+        mask_keys = {"action_valid_mask", "state_mask", OBS_ACTION_MASK, OBS_STATE_MASK}
         for dataset in self._datasets:
             for key, value in dataset.sidecar_default_values.items():
+                if key in mask_keys:
+                    continue
                 defaults.setdefault(key, value)
             for key in dataset.sidecar_default_values:
+                if key in mask_keys:
+                    continue
                 vector_dim = dataset.sidecar_vector_dim(key)
                 if vector_dim is None:
                     continue

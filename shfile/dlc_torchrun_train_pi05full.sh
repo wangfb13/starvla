@@ -43,9 +43,11 @@ PRETRAINED_PATH="${PRETRAINED_PATH:-lerobot/pi05_base}"
 TOKENIZER_NAME="${TOKENIZER_NAME:-/mnt/tacumi_data/huggingface/paligemma-3b-pt-224}"
 
 JOB_NAME="${JOB_NAME:-pi05full_umi_groupA_dlc_torchrun}"
-OUT_DIR="${OUT_DIR:-${ROOT_DIR}/outputs/${JOB_NAME}}"
+RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+RUN_OUTPUT_ROOT="${RUN_OUTPUT_ROOT:-${ROOT_DIR}/outputs/${JOB_NAME}}"
+OUT_DIR="${OUT_DIR:-${RUN_OUTPUT_ROOT}/${RUN_TIMESTAMP}}"
 LOG_DIR="${LOG_DIR:-${ROOT_DIR}/logs/train/${JOB_NAME}}"
-LOG_FILE="${LOG_FILE:-${LOG_DIR}/node${RANK}.log}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/node${RANK}_${RUN_TIMESTAMP}.log}"
 
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -58,13 +60,30 @@ ACTION_GAP_FRAMES="${ACTION_GAP_FRAMES:-6}"
 RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
 RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
 RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
+LOSS_WEIGHT_SUBTASK_CE="${LOSS_WEIGHT_SUBTASK_CE:-1.0}"
 NORMALIZATION_MAPPING="${NORMALIZATION_MAPPING:-}"
 
-mkdir -p "${LOG_DIR}"
+mkdir -p "${RUN_OUTPUT_ROOT}" "${LOG_DIR}"
 
 find_latest_checkpoint_dir() {
-  local out_dir="$1"
-  local checkpoints_dir="${out_dir}/checkpoints"
+  local run_root_dir="$1"
+  local checkpoints_dir=""
+
+  if [[ -d "${run_root_dir}/checkpoints" ]]; then
+    checkpoints_dir="${run_root_dir}/checkpoints"
+  else
+    local latest_run_dir=""
+    latest_run_dir="$(
+      find "${run_root_dir}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+        | grep -E '^[0-9]{8}_[0-9]{6}$|^[0-9]+$' \
+        | sort \
+        | tail -n 1
+    )"
+    if [[ -n "${latest_run_dir}" && -d "${run_root_dir}/${latest_run_dir}/checkpoints" ]]; then
+      checkpoints_dir="${run_root_dir}/${latest_run_dir}/checkpoints"
+    fi
+  fi
+
   if [[ ! -d "${checkpoints_dir}" ]]; then
     return 1
   fi
@@ -85,7 +104,7 @@ find_latest_checkpoint_dir() {
 POLICY_PATH_ARGS=(--policy.pretrained_path="${PRETRAINED_PATH}")
 RESUME_ARGS=()
 if [[ "${RESUME_IF_POSSIBLE}" == "1" && -z "${CONFIG_PATH}" ]]; then
-  latest_checkpoint_dir="$(find_latest_checkpoint_dir "${OUT_DIR}" || true)"
+  latest_checkpoint_dir="$(find_latest_checkpoint_dir "${RUN_OUTPUT_ROOT}" || true)"
   if [[ -n "${latest_checkpoint_dir}" ]]; then
     candidate_config="${latest_checkpoint_dir}/pretrained_model/train_config.json"
     if [[ -f "${candidate_config}" ]]; then
@@ -126,6 +145,7 @@ echo "[info] action_gap_frames=${ACTION_GAP_FRAMES}"
 echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
 echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
 echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
+echo "[info] loss_weight_subtask_ce=${LOSS_WEIGHT_SUBTASK_CE}"
 echo "[info] normalization_mapping=${NORMALIZATION_MAPPING:-<default>}"
 echo "[info] output_dir=${OUT_DIR}"
 echo "[info] log_file=${LOG_FILE}"
@@ -159,6 +179,7 @@ torchrun \
     --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
     --policy.relative_exclude_joints="${RELATIVE_EXCLUDE_JOINTS}" \
     --policy.action_gap_frames="${ACTION_GAP_FRAMES}" \
+    --policy.loss_weight_subtask_ce="${LOSS_WEIGHT_SUBTASK_CE}" \
     --policy.canonicalize_bimanual_rot6d=false \
     --policy.max_state_dim=22 \
     --policy.max_action_dim=20 \

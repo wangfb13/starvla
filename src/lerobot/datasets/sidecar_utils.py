@@ -391,7 +391,6 @@ class FramewiseSidecar:
             "next_subtask_text_sidecar": "next_subtask",
             "user_prompt_sidecar": "user_prompt",
             "state_mask": OBS_STATE_MASK,
-            "action_valid_mask": OBS_ACTION_MASK,
         }
         for source_key, alias_key in alias_defaults.items():
             if source_key in sidecar_df.columns:
@@ -612,9 +611,9 @@ class FramewiseSidecar:
             item.setdefault("user_prompt", "")
 
         if "state_mask" in item:
-            item.setdefault(OBS_STATE_MASK, item["state_mask"])
+            item[OBS_STATE_MASK] = item["state_mask"]
         if "action_valid_mask" in item:
-            item.setdefault(OBS_ACTION_MASK, item["action_valid_mask"])
+            item[OBS_ACTION_MASK] = item["action_valid_mask"]
 
         return item
 
