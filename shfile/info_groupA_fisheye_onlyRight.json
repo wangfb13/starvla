@@ -1,0 +1,21 @@
+{
+  "features": {
+    "observation.images.cam_right": {
+      "dtype": "video",
+      "shape": [
+        3,
+        224,
+        224
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "intrinsics": {
+        "model": "none",
+        "params": []
+      }
+    }
+  }
+}

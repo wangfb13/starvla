@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -43,7 +44,7 @@ POSE_NAMES = {
     "right": ["right_x", "right_y", "right_z", "right_qx", "right_qy", "right_qz", "right_qw"],
 }
 GRIPPER_NAMES = {"left": "gripper_left", "right": "gripper_right"}
-SUBTASK_EPISODE_PATTERN = re.compile(r"_ep(\d+)_")
+SUBTASK_EPISODE_PATTERN = re.compile(r"(?:^|_)ep(\d+)(?:_|$)")
 DEFAULT_SCHEMA_NAME = "pi05_canonical_bimanual_rot6d_v1"
 REAL_ROBOT_TYPES = {"spark3_pose_gripper"}
 UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper"}
@@ -75,6 +76,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "`auto` infers from meta/info.json robot_type. `umi` converts pose state/action to each episode "
             "anchor frame; `real` keeps pose in dataset frame."
+        ),
+    )
+    parser.add_argument(
+        "--real-mask-arm",
+        choices=["none", "left", "right"],
+        default="none",
+        help=(
+            "Only used when resolved dataset_type is `real`. "
+            "Masks the selected arm out of canonical state/action supervision."
         ),
     )
     parser.add_argument(
@@ -216,7 +226,7 @@ def load_frame_table(dataset_root: Path) -> pd.DataFrame:
 
     columns = JOIN_KEYS + [OBS_STATE, ACTION]
     frames = []
-    for path in parquet_paths:
+    for path in tqdm(parquet_paths, desc=f"Loading parquet {dataset_root.name}"):
         LOGGER.info("loading %s", path)
         frames.append(pd.read_parquet(path, columns=columns))
     return pd.concat(frames, ignore_index=True).sort_values("index").reset_index(drop=True)
@@ -366,6 +376,7 @@ def build_state_action_from_raw(
     info: dict[str, Any],
     dataset_type: str,
     missing_value: float,
+    real_mask_arm: str = "none",
 ) -> dict[str, np.ndarray]:
     source_state_names = list(info["features"][OBS_STATE]["names"])
     source_action_names = list(info["features"][ACTION]["names"])
@@ -451,6 +462,11 @@ def build_state_action_from_raw(
             gripper_valid=grip_action_valid,
         )
 
+        if dataset_type == "real" and real_mask_arm == arm:
+            state_arm_mask.fill(0.0)
+            state_present.fill(0.0)
+            action_mask.fill(0.0)
+
         state_arms.append(state_arm)
         state_masks.append(state_arm_mask)
         state_present_bits.append(state_present[:, None])
@@ -511,6 +527,35 @@ def resolve_subtask_text(row: pd.Series, columns: tuple[str, ...]) -> str:
     return ""
 
 
+def resolve_subtask_episode_index(row: pd.Series) -> int | None:
+    subtask_id = row.get("id")
+    if isinstance(subtask_id, str):
+        match = SUBTASK_EPISODE_PATTERN.search(subtask_id)
+        if match is not None:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                pass
+
+    meta = row.get("meta")
+    if isinstance(meta, dict):
+        episode_index = meta.get("episode_index")
+        if episode_index is not None:
+            try:
+                return int(episode_index)
+            except (TypeError, ValueError):
+                pass
+
+    episode_index = row.get("episode_index")
+    if episode_index is not None:
+        try:
+            return int(episode_index)
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
 def build_subtask_columns(frame_df: pd.DataFrame, dataset_root: Path) -> tuple[list[str], list[str]]:
     current = np.full(len(frame_df), "", dtype=object)
     next_text = np.full(len(frame_df), "", dtype=object)
@@ -520,18 +565,18 @@ def build_subtask_columns(frame_df: pd.DataFrame, dataset_root: Path) -> tuple[l
 
     subtasks = pd.read_parquet(subtasks_path)
     grouped_rows: dict[int, list[tuple[int, int, str, str]]] = {}
-    for _, row in subtasks.iterrows():
-        subtask_id = row.get("id")
-        if not isinstance(subtask_id, str):
-            continue
-        match = SUBTASK_EPISODE_PATTERN.search(subtask_id)
-        if match is None:
-            continue
+    for _, row in tqdm(
+        subtasks.iterrows(),
+        total=len(subtasks),
+        desc=f"Reading subtasks {dataset_root.name}",
+    ):
         frames = row.get("frames")
         if not isinstance(frames, (list, tuple, np.ndarray)) or len(frames) != 2:
             continue
+        episode_index = resolve_subtask_episode_index(row)
+        if episode_index is None:
+            continue
         try:
-            episode_index = int(match.group(1))
             start_frame = int(frames[0])
             end_frame = int(frames[1])
         except (TypeError, ValueError):
@@ -545,7 +590,11 @@ def build_subtask_columns(frame_df: pd.DataFrame, dataset_root: Path) -> tuple[l
 
     episode_values = frame_df["episode_index"].to_numpy(dtype=np.int64)
     frame_values = frame_df["frame_index"].to_numpy(dtype=np.int64)
-    for episode_index, entries in grouped_rows.items():
+    for episode_index, entries in tqdm(
+        grouped_rows.items(),
+        total=len(grouped_rows),
+        desc=f"Applying subtasks {dataset_root.name}",
+    ):
         entries.sort(key=lambda entry: entry[0])
         base_start = entries[0][0]
         for start_frame, end_frame, subtask_text, future_text in entries:
@@ -829,6 +878,7 @@ def build_sidecar_for_dataset(
     *,
     dataset_root: Path,
     requested_dataset_type: str,
+    real_mask_arm: str,
     output_root: Path,
     schema_name: str,
     missing_value: float,
@@ -862,6 +912,8 @@ def build_sidecar_for_dataset(
         dataset_type,
         info.get("robot_type"),
     )
+    if dataset_type == "real" and real_mask_arm != "none":
+        LOGGER.info("masking arm for real dataset: %s", real_mask_arm)
     base_stats = read_json(stats_path) if stats_path.exists() else {}
     frame_df = load_frame_table(dataset_root)
     canonical = build_state_action_from_raw(
@@ -869,6 +921,7 @@ def build_sidecar_for_dataset(
         info=info,
         dataset_type=dataset_type,
         missing_value=missing_value,
+        real_mask_arm=real_mask_arm,
     )
 
     task_text = resolve_task_text(dataset_root)
@@ -936,6 +989,7 @@ def build_sidecar_for_dataset(
     summary = {
         "dataset_root": str(dataset_root),
         "dataset_type": dataset_type,
+        "real_mask_arm": real_mask_arm if dataset_type == "real" else "none",
         "robot_type": info.get("robot_type"),
         "schema_name": schema_name,
         "sidecar_path": str(sidecar_path),
@@ -999,7 +1053,7 @@ def main() -> None:
 
     base_sidecar_map = load_base_sidecar_map(args.base_sidecar_map)
     summaries = []
-    for dataset_root in dataset_roots:
+    for dataset_root in tqdm(dataset_roots, desc="Building sidecars"):
         base_sidecar = resolve_base_sidecar(
             dataset_root=dataset_root,
             single_base_sidecar=args.base_sidecar,
@@ -1009,6 +1063,7 @@ def main() -> None:
             build_sidecar_for_dataset(
                 dataset_root=dataset_root,
                 requested_dataset_type=args.dataset_type,
+                real_mask_arm=args.real_mask_arm,
                 output_root=args.output_root,
                 schema_name=args.schema_name,
                 missing_value=args.missing_value,
