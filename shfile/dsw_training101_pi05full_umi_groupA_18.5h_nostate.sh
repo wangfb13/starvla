@@ -47,6 +47,9 @@ RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
 USE_STATE_INPUT="${USE_STATE_INPUT:-false}"
 LOSS_WEIGHT_SUBTASK_CE="${LOSS_WEIGHT_SUBTASK_CE:-1.0}"
 NORMALIZATION_MAPPING="${NORMALIZATION_MAPPING:-}"
+ENABLE_TACTILE="${ENABLE_TACTILE:-false}"
+TACTILE_ENCODER_TYPE="${TACTILE_ENCODER_TYPE:-parsed_vit}"
+TACTILE_FEATURE_KEYS="${TACTILE_FEATURE_KEYS:-[\"observation.depth_deformation.tactile_left_left\",\"observation.depth_deformation.tactile_left_right\",\"observation.depth_deformation.tactile_right_left\",\"observation.depth_deformation.tactile_right_right\"]}"
 
 mkdir -p "${RUN_OUTPUT_ROOT}" "${LOG_DIR}"
 
@@ -138,6 +141,9 @@ echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
 echo "[info] use_state_input=${USE_STATE_INPUT}"
 echo "[info] loss_weight_subtask_ce=${LOSS_WEIGHT_SUBTASK_CE}"
 echo "[info] normalization_mapping=${NORMALIZATION_MAPPING:-<default>}"
+echo "[info] enable_tactile=${ENABLE_TACTILE}"
+echo "[info] tactile_encoder_type=${TACTILE_ENCODER_TYPE}"
+echo "[info] tactile_feature_keys=${TACTILE_FEATURE_KEYS}"
 echo "[info] output_dir=${OUT_DIR}"
 echo "[info] log_file=${LOG_FILE}"
 if [[ -n "${CONFIG_PATH}" ]]; then
@@ -173,6 +179,9 @@ timeout --signal=INT "${TRAIN_HOURS}h" \
     --policy.max_action_dim=20 \
     --policy.canonical_missing_value=9930.0 \
     --policy.push_to_hub=false \
+    --policy.enable_tactile="${ENABLE_TACTILE}" \
+    --policy.tactile_encoder_type="${TACTILE_ENCODER_TYPE}" \
+    --policy.tactile_feature_keys="${TACTILE_FEATURE_KEYS}" \
     "${NORMALIZATION_ARGS[@]}" \
     --steps="${MAX_STEPS}" \
     --log_freq="${LOG_FREQ}" \

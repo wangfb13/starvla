@@ -331,10 +331,31 @@ def decode_video_frames_av(
 
     video_path_lower = video_path.lower()
     if "tactile" in video_path_lower:
-        if "depth" in video_path_lower:
-            closest_frames = closest_frames.type(torch.float32) / 3500.0
+        closest_frames = closest_frames.type(torch.float32)
+        is_depth_deformation = "depth_deformation" in video_path_lower
+        is_depth_shear = "depth_shear" in video_path_lower
+        if is_depth_deformation or is_depth_shear:
+            # New parsed tactile format packs:
+            #   channel 0: depth in [0, 3000]
+            #   channel 1: deformation/shear x in [25000, 35000]
+            #   channel 2: deformation/shear y in [25000, 35000]
+            # Keep the 3-channel layout so downstream tactile encoders can consume it directly.
+            if closest_frames.ndim == 4 and closest_frames.shape[-1] == 3:
+                depth = torch.clamp(closest_frames[..., :1] / 3000.0, 0.0, 1.0)
+                motion = torch.clamp((closest_frames[..., 1:3] - 25000.0) / 10000.0, 0.0, 1.0)
+                closest_frames = torch.cat([depth, motion], dim=-1).permute(0, 3, 1, 2)
+            elif closest_frames.ndim == 3 and closest_frames.shape[-1] == 3:
+                depth = torch.clamp(closest_frames[..., :1] / 3000.0, 0.0, 1.0)
+                motion = torch.clamp((closest_frames[..., 1:3] - 25000.0) / 10000.0, 0.0, 1.0)
+                closest_frames = torch.cat([depth, motion], dim=-1)
+            else:
+                raise ValueError(
+                    f"Expected 3-channel tactile frames for {video_path}, got shape {tuple(closest_frames.shape)}"
+                )
+        elif "depth" in video_path_lower:
+            closest_frames = torch.clamp(closest_frames / 3500.0, 0.0, 1.0)
         elif any(token in video_path_lower for token in ("deformation", "shear")):
-            closest_frames = (closest_frames.type(torch.float32) - 25000.0) / 10000.0
+            closest_frames = (closest_frames - 25000.0) / 10000.0
             closest_frames = torch.clamp(closest_frames, 0.0, 1.0)
             if closest_frames.ndim == 4 and closest_frames.shape[-1] == 3:
                 closest_frames = closest_frames[..., :2].permute(0, 3, 1, 2)

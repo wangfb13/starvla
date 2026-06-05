@@ -23,6 +23,9 @@
 - `scripts/docs/pi05_pi05full_output_analysis_zh.md`
   - 单独说明“模型输出本身”的分析能力
   - 区分训练曲线分析、next-subtask 预测分析、rollout 结果分析
+- `scripts/docs/pi05_pi05full_tactile_zh.md`
+  - 单独说明 `pi05_full` 新增 tactile 分支
+  - 包括数据加载路径、`flat` / `parsed_vit` 两种编码器，以及训练配置建议
 
 适用范围：
 

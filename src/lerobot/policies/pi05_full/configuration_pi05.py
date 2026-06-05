@@ -47,6 +47,29 @@ class PI05FullConfig(PreTrainedConfig):
     # When disabled, PI0.5 uses a task-only prompt.
     use_state_input: bool = True
 
+    # Optional tactile prefix conditioning.
+    # `flat` keeps a lightweight pooled/flattened branch for arbitrary tactile tensors.
+    # `parsed_vit` uses a small ViT-style encoder for parsed tactile maps.
+    enable_tactile: bool = False
+    tactile_feature_keys: list[str] = field(default_factory=list)
+    tactile_encoder_type: str = "flat"
+    tactile_tokens: int = 16
+    max_tactile_dim: int = 128
+    tactile_dropout_prob: float = 0.1
+    tactile_fallback_to_state: bool = False
+    tactile_mask_key: str = "observation.tactile_present"
+    tactile_slot_present_key: str = "observation.tactile_slot_present"
+    enable_tactile_role_embeddings: bool = True
+    # Backward-compatible alias. If set true it forces tactile_encoder_type=parsed_vit.
+    enable_parsed_tactile_vit: bool = False
+    tactile_input_channels: int = 3
+    tactile_target_size: tuple[int, int] = (96, 128)
+    tactile_patch_size: int = 16
+    tactile_patch_encoder_dim: int = 384
+    tactile_patch_encoder_depth: int = 12
+    tactile_resampler_heads: int = 6
+    tactile_token_budget_per_sensor: int = 8
+
     # Flow matching parameters: see openpi `PI0Pytorch`
     num_inference_steps: int = 10
     time_sampling_beta_alpha: float = 1.5
@@ -167,6 +190,35 @@ class PI05FullConfig(PreTrainedConfig):
             raise ValueError("temperature must be non-negative.")
         if self.subtask_regeneration_interval < 0:
             raise ValueError("subtask_regeneration_interval must be non-negative.")
+        if self.enable_parsed_tactile_vit:
+            self.tactile_encoder_type = "parsed_vit"
+        if self.tactile_encoder_type not in {"flat", "parsed_vit"}:
+            raise ValueError(
+                f"Unsupported tactile_encoder_type={self.tactile_encoder_type!r}. "
+                "Expected one of {'flat', 'parsed_vit'}."
+            )
+        if self.enable_tactile:
+            if self.tactile_tokens <= 0:
+                raise ValueError("tactile_tokens must be positive.")
+            if self.max_tactile_dim <= 0:
+                raise ValueError("max_tactile_dim must be positive.")
+            if not 0.0 <= self.tactile_dropout_prob <= 1.0:
+                raise ValueError("tactile_dropout_prob must be in [0, 1].")
+            if self.tactile_encoder_type == "parsed_vit":
+                if self.tactile_input_channels <= 0:
+                    raise ValueError("tactile_input_channels must be positive.")
+                if len(self.tactile_target_size) != 2 or min(self.tactile_target_size) <= 0:
+                    raise ValueError("tactile_target_size must be a positive (H, W) pair.")
+                if self.tactile_patch_size <= 0:
+                    raise ValueError("tactile_patch_size must be positive.")
+                if self.tactile_patch_encoder_dim <= 0:
+                    raise ValueError("tactile_patch_encoder_dim must be positive.")
+                if self.tactile_patch_encoder_depth <= 0:
+                    raise ValueError("tactile_patch_encoder_depth must be positive.")
+                if self.tactile_resampler_heads <= 0:
+                    raise ValueError("tactile_resampler_heads must be positive.")
+                if self.tactile_token_budget_per_sensor <= 0:
+                    raise ValueError("tactile_token_budget_per_sensor must be positive.")
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""
