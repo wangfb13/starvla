@@ -259,6 +259,77 @@ gripper = clip(raw_gripper, -0.436, 0.0) / -0.436
 
 因此 `0 -> 0`，`-0.218 -> 0.5`，`-0.436` 以及更小值都会变成 `1`。归一化后的 gripper 在 sidecar 中保存为 framewise 连续值，训练时再按 chunk relative 转换。
 
+### 5.2 真机数据
+
+以下 `robot_type` 会按真机数据处理：
+
+```text
+spark3_pose_gripper
+```
+
+真机数据与 UMI 的主要区别是：
+
+- pose 不会再转换到每个 episode 的 anchor 坐标系
+- sidecar 会保留数据集原始坐标系下的 absolute pose
+- 但可以在生成 sidecar 时，显式把某一只手从 canonical state/action supervision 里 mask 掉
+
+对应脚本参数在 [build_pi05_canonical_sidecar.py](/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/build_pi05_canonical_sidecar.py:82)：
+
+```bash
+--real-mask-arm {none,left,right}
+```
+
+它只在解析后的 `dataset_type == real` 时生效，默认值是：
+
+```bash
+--real-mask-arm none
+```
+
+也就是：
+
+- `none`：左右手都保留监督
+- `left`：把左臂从 canonical supervision 里屏蔽掉
+- `right`：把右臂从 canonical supervision 里屏蔽掉
+
+脚本里的实际处理逻辑在 [build_pi05_canonical_sidecar.py](/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/build_pi05_canonical_sidecar.py:465)：
+
+- 如果是真机数据，且 `real_mask_arm` 命中了当前 arm
+- 则会把这一侧的 `state_arm_mask` 全部置 0
+- 同时把这一侧的 `action_mask` 全部置 0
+
+注意这里 mask 掉的是“监督信号”，不是直接删除数值本身：
+
+- `canonical_state` / `canonical_action` 数值仍然会写进 sidecar
+- 但训练时真正控制 loss 是否生效的是：
+  - `state_mask`
+  - `action_valid_mask`
+
+因此一旦某一侧 arm 被 mask：
+
+- 这只手对应的 state 维度不会参与 state 有效性监督
+- 这只手对应的 action 维度不会参与 action loss
+- 另一只手仍然正常保留
+
+这对“真机单臂数据按双臂 canonical 格式训练”尤其有用。例如：
+
+- 右臂真机数据，只想监督右臂，可以设置：
+
+```bash
+--dataset-type real --real-mask-arm left
+```
+
+- 左臂真机数据，只想监督左臂，可以设置：
+
+```bash
+--dataset-type real --real-mask-arm right
+```
+
+- 双臂真机数据，想保留完整双臂监督，则使用：
+
+```bash
+--dataset-type real --real-mask-arm none
+```
+
 UMI 训练默认使用全局：
 这个可以根据自身系统的实际情况进行修改，粗略算的话就是系统模型推理时间按照30帧算得到的帧数
 
@@ -266,7 +337,7 @@ UMI 训练默认使用全局：
 --policy.action_gap_frames=6
 ```
 
-### 5.2 真机数据
+### 5.3 真机数据action_gap_frames
 
 以下 `robot_type` 会按真机数据处理：
 

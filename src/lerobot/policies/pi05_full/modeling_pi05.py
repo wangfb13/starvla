@@ -2260,7 +2260,10 @@ class PI05FullPolicy(PreTrainedPolicy):
                 flow_per_sample_loss = losses.sum(dim=(1, 2)) / per_sample_denom
             else:
                 flow_per_sample_loss = losses.mean(dim=(1, 2))
-            per_sample_loss = flow_per_sample_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss_per_sample
+            per_sample_loss = (
+                self.config.loss_weight_flow * flow_per_sample_loss
+                + self.config.loss_weight_subtask_ce * subtask_ce_loss_per_sample
+            )
             loss_dict["flow_loss"] = flow_per_sample_loss.mean().item()
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
@@ -2285,7 +2288,7 @@ class PI05FullPolicy(PreTrainedPolicy):
                 flow_loss = losses.sum() / mask_sum.clamp_min(1.0)
             else:
                 flow_loss = losses.mean()
-            loss = flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss
+            loss = self.config.loss_weight_flow * flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss
             loss_dict["flow_loss"] = flow_loss.item()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict

@@ -135,6 +135,7 @@ class PI05FullConfig(PreTrainedConfig):
     # Finetuning settings
     freeze_vision_encoder: bool = False  # Freeze only the vision encoder
     train_expert_only: bool = False  # Freeze entire VLM, train only action expert and projections
+    loss_weight_flow: float = 1.0
     loss_weight_subtask_ce: float = 1.0
 
     # Optimizer settings: see openpi `AdamW`
@@ -182,6 +183,8 @@ class PI05FullConfig(PreTrainedConfig):
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
 
+        if self.loss_weight_flow < 0:
+            raise ValueError("loss_weight_flow must be non-negative.")
         if self.loss_weight_subtask_ce < 0:
             raise ValueError("loss_weight_subtask_ce must be non-negative.")
         if self.max_decoding_steps <= 0:
@@ -199,9 +202,9 @@ class PI05FullConfig(PreTrainedConfig):
             )
         if self.enable_tactile:
             if self.tactile_tokens <= 0:
-                raise ValueError("tactile_tokens must be positive.")
+                raise ValueError("tactile_tokens must be positive., got {self.tactile_tokens}")
             if self.max_tactile_dim <= 0:
-                raise ValueError("max_tactile_dim must be positive.")
+                raise ValueError("max_tactile_dim must be positive., got {self.max_tactile_dim}")
             if not 0.0 <= self.tactile_dropout_prob <= 1.0:
                 raise ValueError("tactile_dropout_prob must be in [0, 1].")
             if self.tactile_encoder_type == "parsed_vit":

@@ -35,11 +35,12 @@ CONFIG_PATH="${CONFIG_PATH:-}"
 RESUME_IF_POSSIBLE="${RESUME_IF_POSSIBLE:-0}"
 
 DATASET_ROOTS_FILE="${DATASET_ROOTS_FILE:-${ROOT_DIR}/scripts/sparky_pegSorting_roots.txt}"
-CANONICAL_SIDECAR_ROOT="${CANONICAL_SIDECAR_ROOT:-/mnt/cpfs/datasets/pi05_canonical_sidecars_pegSorting_sparky}"
+CANONICAL_SIDECAR_ROOT="${CANONICAL_SIDECAR_ROOT:-/mnt/cpfs/datasets/pi05_canonical_sidecars_pegSorting_sparky_onlyRightArm}"
 INFO_PATH="${INFO_PATH:-${ROOT_DIR}/shfile/info_groupA_fisheye_onlyRight.json}"
 VIDEO_BACKEND="${VIDEO_BACKEND:-pyav}"
 
-PRETRAINED_PATH="${PRETRAINED_PATH:-lerobot/pi05_base}"
+# PRETRAINED_PATH="${PRETRAINED_PATH:-lerobot/pi05_base}"
+PRETRAINED_PATH="${PRETRAINED_PATH:-/mnt/base/user/zfc/lerobot_vtla_share/pi05_runs/pi05_groupA_formal_real_v2_tacnorm_skipbad_dlc_cont_bs16_real_v2_tacnorm_skipbad_dlc_cont_20260606T223000Z/outputs/checkpoints/010000/pretrained_model}"
 TOKENIZER_NAME="${TOKENIZER_NAME:-/mnt/tacumi_data/huggingface/paligemma-3b-pt-224}"
 
 JOB_NAME="${JOB_NAME:-pi05full_sparky_pegSorting_only_color_dlc_torchrun}"
@@ -61,11 +62,13 @@ RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
 RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
 RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
 USE_STATE_INPUT="${USE_STATE_INPUT:-false}"
+LOSS_WEIGHT_FLOW="${LOSS_WEIGHT_FLOW:-1.0}"
 LOSS_WEIGHT_SUBTASK_CE="${LOSS_WEIGHT_SUBTASK_CE:-1.0}"
 NORMALIZATION_MAPPING="${NORMALIZATION_MAPPING:-}"
 ENABLE_TACTILE="${ENABLE_TACTILE:-false}"
 TACTILE_ENCODER_TYPE="${TACTILE_ENCODER_TYPE:-parsed_vit}"
 TACTILE_FEATURE_KEYS="${TACTILE_FEATURE_KEYS:-[\"observation.depth_deformation.tactile_left_left\",\"observation.depth_deformation.tactile_left_right\",\"observation.depth_deformation.tactile_right_left\",\"observation.depth_deformation.tactile_right_right\"]}"
+TACTILE_PATCH_ENCODER_DIM="${TACTILE_PATCH_ENCODER_DIM:-384}"
 
 mkdir -p "${RUN_OUTPUT_ROOT}" "${LOG_DIR}"
 
@@ -150,11 +153,13 @@ echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
 echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
 echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
 echo "[info] use_state_input=${USE_STATE_INPUT}"
+echo "[info] loss_weight_flow=${LOSS_WEIGHT_FLOW}"
 echo "[info] loss_weight_subtask_ce=${LOSS_WEIGHT_SUBTASK_CE}"
 echo "[info] normalization_mapping=${NORMALIZATION_MAPPING:-<default>}"
 echo "[info] enable_tactile=${ENABLE_TACTILE}"
 echo "[info] tactile_encoder_type=${TACTILE_ENCODER_TYPE}"
 echo "[info] tactile_feature_keys=${TACTILE_FEATURE_KEYS}"
+echo "[info] tactile_patch_encoder_dim=${TACTILE_PATCH_ENCODER_DIM}"
 echo "[info] output_dir=${OUT_DIR}"
 echo "[info] log_file=${LOG_FILE}"
 if [[ -n "${CONFIG_PATH}" ]]; then
@@ -188,6 +193,7 @@ torchrun \
     --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
     --policy.relative_exclude_joints="${RELATIVE_EXCLUDE_JOINTS}" \
     --policy.action_gap_frames="${ACTION_GAP_FRAMES}" \
+    --policy.loss_weight_flow="${LOSS_WEIGHT_FLOW}" \
     --policy.loss_weight_subtask_ce="${LOSS_WEIGHT_SUBTASK_CE}" \
     --policy.canonicalize_bimanual_rot6d=false \
     --policy.max_state_dim=22 \
@@ -197,6 +203,7 @@ torchrun \
     --policy.enable_tactile="${ENABLE_TACTILE}" \
     --policy.tactile_encoder_type="${TACTILE_ENCODER_TYPE}" \
     --policy.tactile_feature_keys="${TACTILE_FEATURE_KEYS}" \
+    --policy.tactile_patch_encoder_dim="${TACTILE_PATCH_ENCODER_DIM}" \
     "${NORMALIZATION_ARGS[@]}" \
     --steps="${MAX_STEPS}" \
     --log_freq="${LOG_FREQ}" \
