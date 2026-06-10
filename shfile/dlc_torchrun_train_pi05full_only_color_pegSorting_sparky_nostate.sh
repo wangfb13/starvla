@@ -40,7 +40,7 @@ INFO_PATH="${INFO_PATH:-${ROOT_DIR}/shfile/info_groupA_fisheye_onlyRight.json}"
 VIDEO_BACKEND="${VIDEO_BACKEND:-pyav}"
 
 # PRETRAINED_PATH="${PRETRAINED_PATH:-lerobot/pi05_base}"
-PRETRAINED_PATH="${PRETRAINED_PATH:-/mnt/base/user/zfc/lerobot_vtla_share/pi05_runs/pi05_groupA_formal_real_v2_tacnorm_skipbad_dlc_cont_bs16_real_v2_tacnorm_skipbad_dlc_cont_20260606T223000Z/outputs/checkpoints/010000/pretrained_model}"
+PRETRAINED_PATH="${PRETRAINED_PATH:-/mnt/base/user/zfc//lerobot_vtla_share/pi05_runs/pi05_groupA_formal_real_v2_pose_state_statearmblock_tactvit_pi05base_bs8_real_v2_pose_state_statearmblock_tactvit_pi05base_20260608T213500Z/outputs/checkpoints/010000/pretrained_model}"
 TOKENIZER_NAME="${TOKENIZER_NAME:-/mnt/tacumi_data/huggingface/paligemma-3b-pt-224}"
 
 JOB_NAME="${JOB_NAME:-pi05full_sparky_pegSorting_only_color_dlc_torchrun}"
