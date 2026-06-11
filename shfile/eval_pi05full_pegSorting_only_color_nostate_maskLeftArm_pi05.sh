@@ -9,6 +9,9 @@ export LEROBOT_EVAL_RIGHT_ARM_PRESENT=1
 REPO_ROOT="/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5"
 INTRINSICS_PATH="${REPO_ROOT}/src/lerobot/camera_intrinsic/camera_calibration_right_wrist.json"
 POLICY_PATH="${REPO_ROOT}/outputs/pi05full_sparky_pegSorting_only_color_nostate_maskLeftArm_pi05_20260608T213500Z/20260609_155604/checkpoints/030000/pretrained_model"
+RUN_TS="$(date '+%Y%m%d_%H%M%S')"
+EVAL_NAME="eval_pi05full_pegSorting_only_color_nostate_maskLeftArm_pi05_030000_${RUN_TS}"
+DATASET_ROOT_BASE="/home/cxzk/DM_das/datasets"
 
 if [ ! -f "${INTRINSICS_PATH}" ]; then
   echo "Missing intrinsics file: ${INTRINSICS_PATH}"
@@ -33,8 +36,8 @@ python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
     }
   }' \
   --display_data=false \
-  --dataset.repo_id=/eval_pi05full_pegSorting_only_color_nostate_maskLeftArm_pi05_030000 \
-  --dataset.root=/home/cxzk/DM_das/datasets/eval_pi05full_pegSorting_only_color_nostate_maskLeftArm_pi05_030000 \
+  --dataset.repo_id="/${EVAL_NAME}" \
+  --dataset.root="${DATASET_ROOT_BASE}/${EVAL_NAME}" \
   --dataset.push_to_hub=false \
   --dataset.num_episodes=10 \
   --dataset.episode_time_s=600 \
