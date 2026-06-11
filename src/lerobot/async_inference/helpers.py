@@ -182,6 +182,11 @@ def _extract_optional_arm_present(raw_observation: RawObservation) -> dict[str, 
     left = raw_observation.get("left_arm_present", raw_observation.get("left_present"))
     right = raw_observation.get("right_arm_present", raw_observation.get("right_present"))
     if left is None and right is None:
+        env_left = os.getenv("LEROBOT_EVAL_LEFT_ARM_PRESENT")
+        env_right = os.getenv("LEROBOT_EVAL_RIGHT_ARM_PRESENT")
+        left = env_left if env_left is not None else None
+        right = env_right if env_right is not None else None
+    if left is None and right is None:
         return None
     return {
         "left": True if left is None else bool(float(left) > 0.5),
