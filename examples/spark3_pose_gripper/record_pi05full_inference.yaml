@@ -1,0 +1,99 @@
+# Usage:
+#   lerobot-record \
+#     --config_path=examples/spark3_pose_gripper/record_pi05full_inference.yaml \
+#     --policy.path=/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/outputs/pi05full_nostate_tactile_test/20260608_191701/checkpoints/030000/pretrained_model
+#
+# Notes:
+# - This file is for running Spark3 with a policy in the normal `lerobot-record` loop.
+# - The current parser reads `policy.path` from CLI, not from this yaml file,
+#   so keep using `--policy.path=...` on the command line.
+# - Online Spark sidecar adaptation for pi05_full is handled automatically at inference time.
+# - If your checkpoint expects different camera keys, update `dataset.rename_map`.
+
+robot:
+  type: spark3_pose_gripper
+  id: spark3_follower
+  state_topic: /wbc_state_pose
+  command_topic: /wbc_goal_pose
+  joint_state_topic: /joint_states
+  connect_timeout_s: 10.0
+  ros_node_name: lerobot_spark3_pose_gripper
+  trigger_initial_pose_service: null
+  cameras:
+    cam_top:
+      type: OrbbecCamera
+      serial_number: AY3794300HG
+      fps: 30
+      width: 640
+      height: 480
+      use_depth: false
+      warmup_s: 5
+      intrinsics_file: /home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic/orbbec_intrinsics_AY3794300HG_all_resolutions.json
+
+    cam_right_wrist:
+      type: wirstFisheyeX5
+      x5_ip: 192.168.9.11
+      fps: 30
+      width: 1920
+      height: 1080
+      use_gpu_decode: false
+      warmup_s: 10
+      intrinsics_file: /home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic/camera_calibration_right_wrist.json
+
+    cam_left_wrist:
+      type: wirstFisheyeX5
+      x5_ip: 192.168.9.10
+      fps: 30
+      width: 1920
+      height: 1080
+      use_gpu_decode: false
+      warmup_s: 10
+      intrinsics_file: /home/cxzk/DM_das/lerobot-v0.5.0/src/lerobot/camera_intrinsic/camera_calibration_left_wrist.json
+
+    # Uncomment if using a tactile-enabled checkpoint and the tactile cameras are available.
+    # cam_right_gripper_tactile:
+    #   type: dmTactileX5
+    #   x5_ip: 192.168.9.11
+    #   left_serial_number: X25510037
+    #   right_serial_number: X26040064
+    #   fps: 30
+    #   width: 128
+    #   height: 96
+    #   inference_mode: true
+
+    # cam_left_gripper_tactile:
+    #   type: dmTactileX5
+    #   x5_ip: 192.168.9.10
+    #   left_serial_number: X26040023
+    #   right_serial_number: X26040213
+    #   fps: 30
+    #   width: 128
+    #   height: 96
+    #   inference_mode: true
+
+dataset:
+  repo_id: outputs/spark3_pose_gripper_pi05full_inference_debug
+  single_task: Run pi05_full policy inference on Spark3 and record debug rollouts.
+  root: /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/outputs/spark3_pose_gripper_pi05full_inference_debug
+  fps: 30
+  episode_time_s: 120
+  reset_time_s: 5
+  num_episodes: 1
+  video: true
+  push_to_hub: false
+  private: false
+  streaming_encoding: true
+
+  # Rename raw robot observation image keys to match the checkpoint input feature keys.
+  # Adjust this mapping if your checkpoint expects different names.
+  rename_map:
+    observation.images.cam_right_wrist: observation.images.cam_right
+
+# No teleoperator by default: policy-only inference.
+# If you want teleop takeover during debugging, add a valid `teleop:` block here.
+
+display_data: false
+display_compressed_images: false
+play_sounds: false
+resume: false
+interpolation_multiplier: 1

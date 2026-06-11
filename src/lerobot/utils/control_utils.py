@@ -28,11 +28,16 @@ import numpy as np
 import torch
 from deepdiff import DeepDiff
 
+from lerobot.async_inference.helpers import (
+    augment_observation_for_online_pi05_full_sidecar,
+    should_use_online_pi05_full_sidecar_adapter,
+)
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import DEFAULT_FEATURES
 from lerobot.policies.pi05.canonical_bimanual import (
     CANONICAL_ACTION_DIM,
     canonical_bimanual_action_to_pose_gripper_dict,
+    extract_arm_validity_from_action_mask,
     extract_arm_validity_from_canonical_state,
 )
 from lerobot.policies.pretrained import PreTrainedPolicy
@@ -40,6 +45,7 @@ from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.processor import PolicyProcessorPipeline
 from lerobot.robots import Robot
 from lerobot.types import PolicyAction
+from lerobot.utils.constants import OBS_ACTION_MASK, OBS_STATE, OBS_STATE_MASK
 
 
 @cache
@@ -87,10 +93,31 @@ def _build_spark3_default_action_from_observation(observation: dict[str, Any]) -
     return action_dict_from_observation(observation)
 
 
+def _ensure_online_sidecar_batch_dims(
+    observation: dict[str, Any],
+    policy: PreTrainedPolicy,
+) -> None:
+    tensor_keys = {
+        OBS_STATE,
+        OBS_ACTION_MASK,
+        getattr(policy.config, "action_mask_observation_key", OBS_ACTION_MASK),
+        getattr(policy.config, "state_mask_observation_key", OBS_STATE_MASK),
+        getattr(policy.config, "tactile_mask_key", "observation.tactile_present"),
+        getattr(policy.config, "tactile_slot_present_key", "observation.tactile_slot_present"),
+    }
+    for key in tensor_keys:
+        value = observation.get(key)
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.ndim <= 1:
+            observation[key] = value.unsqueeze(0)
+
+
 def _maybe_convert_pi05_canonical_action_to_robot_action(
     *,
     action: PolicyAction,
-    observation: dict[str, Any],
+    raw_observation: dict[str, Any],
+    prepared_observation: dict[str, Any] | None,
     policy: PreTrainedPolicy,
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     robot_type: str | None,
@@ -98,7 +125,13 @@ def _maybe_convert_pi05_canonical_action_to_robot_action(
     if robot_type != "spark3_pose_gripper":
         return action
 
-    if not getattr(policy.config, "canonicalize_bimanual_rot6d", False):
+    use_builtin_canonical = bool(getattr(policy.config, "canonicalize_bimanual_rot6d", False))
+    use_online_sidecar = should_use_online_pi05_full_sidecar_adapter(
+        policy_type=policy.name,
+        policy_config=policy.config,
+        robot_type=robot_type,
+    )
+    if not use_builtin_canonical and not use_online_sidecar:
         return action
 
     if not isinstance(action, torch.Tensor):
@@ -106,6 +139,7 @@ def _maybe_convert_pi05_canonical_action_to_robot_action(
     if action.shape[-1] != CANONICAL_ACTION_DIM:
         return action
 
+    action_tensor = action.squeeze(0) if action.ndim == 2 and action.shape[0] == 1 else action
     state = _get_cached_preprocessor_state(preprocessor)
     arm_valid = None
     if state is not None:
@@ -113,11 +147,30 @@ def _maybe_convert_pi05_canonical_action_to_robot_action(
             arm_valid = extract_arm_validity_from_canonical_state(state)
         except ValueError:
             arm_valid = None
+    if arm_valid is None and prepared_observation is not None:
+        prepared_state = prepared_observation.get(OBS_STATE)
+        if isinstance(prepared_state, torch.Tensor):
+            prepared_state = prepared_state.squeeze(0) if prepared_state.ndim == 2 else prepared_state
+            try:
+                arm_valid = extract_arm_validity_from_canonical_state(prepared_state)
+            except ValueError:
+                arm_valid = None
+    if arm_valid is None and prepared_observation is not None:
+        action_mask_key = getattr(policy.config, "action_mask_observation_key", OBS_ACTION_MASK)
+        prepared_action_mask = prepared_observation.get(action_mask_key, prepared_observation.get(OBS_ACTION_MASK))
+        if isinstance(prepared_action_mask, torch.Tensor):
+            prepared_action_mask = (
+                prepared_action_mask.squeeze(0) if prepared_action_mask.ndim == 2 else prepared_action_mask
+            )
+            try:
+                arm_valid = extract_arm_validity_from_action_mask(prepared_action_mask)
+            except ValueError:
+                arm_valid = None
 
-    robot_action = _build_spark3_default_action_from_observation(observation)
+    robot_action = _build_spark3_default_action_from_observation(raw_observation)
     robot_action.update(
         canonical_bimanual_action_to_pose_gripper_dict(
-            action,
+            action_tensor,
             arm_valid=arm_valid,
         )
     )
@@ -148,6 +201,7 @@ def predict_action(
     use_amp: bool,
     task: str | None = None,
     robot_type: str | None = None,
+    raw_observation: dict[str, Any] | None = None,
 ):
     """
     Performs a single-step inference to predict a robot action from an observation.
@@ -174,13 +228,26 @@ def predict_action(
         this is converted into a robot action dictionary directly.
     """
     observation = copy(observation)
-    raw_observation = copy(observation)
+    raw_observation = copy(raw_observation) if raw_observation is not None else copy(observation)
+    prepared_observation = None
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         observation = prepare_observation_for_inference(observation, device, task, robot_type)
+        if should_use_online_pi05_full_sidecar_adapter(
+            policy_type=policy.name,
+            policy_config=policy.config,
+            robot_type=robot_type,
+        ):
+            augment_observation_for_online_pi05_full_sidecar(
+                observation=observation,
+                raw_observation=raw_observation,
+                policy_config=policy.config,
+            )
+            _ensure_online_sidecar_batch_dims(observation, policy)
+        prepared_observation = observation
         observation = preprocessor(observation)
 
         # Compute the next action with the policy
@@ -191,7 +258,8 @@ def predict_action(
 
     action = _maybe_convert_pi05_canonical_action_to_robot_action(
         action=action,
-        observation=raw_observation,
+        raw_observation=raw_observation,
+        prepared_observation=prepared_observation,
         policy=policy,
         preprocessor=preprocessor,
         robot_type=robot_type,

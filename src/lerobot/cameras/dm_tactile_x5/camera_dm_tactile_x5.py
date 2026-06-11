@@ -42,6 +42,7 @@ class DmTactileCameraX5(Camera):
         self.left_serial_number = config.left_serial_number.strip() if config.left_serial_number else None
         self.right_serial_number = config.right_serial_number.strip() if config.right_serial_number else None
         self.warmup_s = config.warmup_s
+        self.inference_mode = config.inference_mode
 
         self.context: Any | None = None
         self.socket: Any | None = None
@@ -171,6 +172,69 @@ class DmTactileCameraX5(Camera):
             return "right"
         return None
 
+    def _validate_frame_resolution(self, frame: NDArray[Any]) -> None:
+        if self.width is not None and self.height is not None:
+            if frame.shape[1] != self.width or frame.shape[0] != self.height:
+                raise RuntimeError(
+                    f"{self} tactile frame resolution mismatch: got {frame.shape[1]}x{frame.shape[0]}, expected {self.width}x{self.height}."
+                )
+
+    def _resize_inference_frame(self, frame: NDArray[Any]) -> NDArray[Any]:
+        if self.width is None or self.height is None:
+            return frame
+        if frame.shape[1] == self.width and frame.shape[0] == self.height:
+            return frame
+
+        try:
+            import cv2
+        except Exception as e:
+            raise ImportError(
+                f"{self} requires OpenCV to resize tactile inference frames from "
+                f"{frame.shape[1]}x{frame.shape[0]} to {self.width}x{self.height}: {e}"
+            ) from e
+
+        resized = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+        if resized.ndim == 2:
+            resized = resized[:, :, None]
+        return resized.astype(frame.dtype, copy=False)
+
+    def _decode_raw_rgb_frame(self, raw_b: bytes, meta: dict[str, Any]) -> NDArray[Any]:
+        raw_info = meta.get("raw", {})
+        if not raw_info.get("present") or not raw_info.get("shape"):
+            raise RuntimeError(f"{self} received tactile frame without raw shape metadata.")
+
+        shape = tuple(raw_info["shape"])
+        frame = np.frombuffer(raw_b, dtype=np.uint8).reshape(shape)
+        if frame.ndim == 2:
+            frame = frame[:, :, None]
+        if frame.ndim != 3:
+            raise RuntimeError(f"{self} expected a 2D/3D tactile frame, got shape {frame.shape}.")
+
+        self._validate_frame_resolution(frame)
+
+        if frame.shape[2] == 1:
+            frame = np.repeat(frame, 3, axis=2)
+        elif frame.shape[2] != 3:
+            raise RuntimeError(f"{self} expected 1 or 3 tactile channels, got {frame.shape[2]}.")
+
+        return frame
+
+    def _decode_depth_deformation_frame(self, raw_b: bytes, meta: dict[str, Any]) -> NDArray[Any]:
+        frame_meta = meta.get("frame", {})
+        shape = tuple(frame_meta.get("shape", ()))
+        if len(shape) != 3 or shape[2] != 3:
+            raise RuntimeError(f"{self} expected uint16 tactile frame shape [H,W,3], got {shape}.")
+
+        dtype = str(frame_meta.get("dtype", "uint16")).lower()
+        if dtype != "uint16":
+            raise RuntimeError(f"{self} expected uint16 tactile payload in inference mode, got {dtype}.")
+
+        frame = np.frombuffer(raw_b, dtype=np.uint16).reshape(shape)
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            raise RuntimeError(f"{self} expected 3-channel tactile frame, got shape {frame.shape}.")
+
+        return self._resize_inference_frame(frame)
+
     def _read_from_hardware(self) -> tuple[str, NDArray[Any]]:
         if not self.is_connected or self.socket is None:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -188,27 +252,10 @@ class DmTactileCameraX5(Camera):
             raise RuntimeError(f"{self} received tactile frame for unexpected serial `{serial}`.")
 
         meta = json.loads(meta_b.decode("utf-8"))
-        raw_info = meta.get("raw", {})
-        if not raw_info.get("present") or not raw_info.get("shape"):
-            raise RuntimeError(f"{self} received tactile frame without raw shape metadata.")
-
-        shape = tuple(raw_info["shape"])
-        frame = np.frombuffer(raw_b, dtype=np.uint8).reshape(shape)
-        if frame.ndim == 2:
-            frame = frame[:, :, None]
-        if frame.ndim != 3:
-            raise RuntimeError(f"{self} expected a 2D/3D tactile frame, got shape {frame.shape}.")
-
-        if self.width is not None and self.height is not None:
-            if frame.shape[1] != self.width or frame.shape[0] != self.height:
-                raise RuntimeError(
-                    f"{self} tactile frame resolution mismatch: got {frame.shape[1]}x{frame.shape[0]}, expected {self.width}x{self.height}."
-                )
-
-        if frame.shape[2] == 1:
-            frame = np.repeat(frame, 3, axis=2)
-        elif frame.shape[2] != 3:
-            raise RuntimeError(f"{self} expected 1 or 3 tactile channels, got {frame.shape[2]}.")
+        if self.inference_mode:
+            frame = self._decode_depth_deformation_frame(raw_b, meta)
+        else:
+            frame = self._decode_raw_rgb_frame(raw_b, meta)
 
         return side, frame
 
@@ -250,6 +297,15 @@ class DmTactileCameraX5(Camera):
                 time.sleep(0.001)
 
     def _copy_frames(self) -> dict[str, NDArray[Any] | None]:
+        if self.inference_mode:
+            return {
+                "left_tactile_depth_deformation": None
+                if self.latest_frames["left"] is None
+                else self.latest_frames["left"].copy(),
+                "right_tactile_depth_deformation": None
+                if self.latest_frames["right"] is None
+                else self.latest_frames["right"].copy(),
+            }
         return {
             "left_tactile": None if self.latest_frames["left"] is None else self.latest_frames["left"].copy(),
             "right_tactile": None if self.latest_frames["right"] is None else self.latest_frames["right"].copy(),

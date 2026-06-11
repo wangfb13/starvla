@@ -398,6 +398,7 @@ def record_loop(
                         use_amp=policy.config.use_amp,
                         task=single_task,
                         robot_type=robot.robot_type,
+                        raw_observation=obs_processed,
                     )
                     act_processed_policy = make_robot_action(action_values, dataset.features)
                     robot_action_to_send = robot_action_processor((act_processed_policy, obs))
@@ -424,6 +425,7 @@ def record_loop(
                     use_amp=policy.config.use_amp,
                     task=single_task,
                     robot_type=robot.robot_type,
+                    raw_observation=obs_processed,
                 )
                 act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
                 # Applies a pipeline to the action, default is IdentityProcessor

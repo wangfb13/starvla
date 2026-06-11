@@ -46,6 +46,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
 from lerobot.types import PolicyAction
+from lerobot.utils.constants import OBS_STATE
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -346,7 +347,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             observation_t.get_observation(),
             self.lerobot_features,
             self.policy_image_features,
+            policy_type=self.policy_type,
+            policy_config=self.policy.config,
+            robot_type=self.robot_type,
         )
+        prepared_observation = observation
         prepare_time = time.perf_counter() - start_prepare
 
         """2. Apply preprocessor"""
@@ -390,8 +395,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 policy_type=self.policy_type,
                 policy_config=self.policy.config,
                 robot_type=self.robot_type,
-                canonical_state=observation_t.get_canonical_state(),
-                action_mask=observation.get(getattr(self.policy.config, "action_mask_observation_key", "")),
+                canonical_state=prepared_observation.get(OBS_STATE, observation_t.get_canonical_state()),
+                action_mask=prepared_observation.get(getattr(self.policy.config, "action_mask_observation_key", "")),
             )
             if converted_chunk is not None:
                 action_payload = converted_chunk
