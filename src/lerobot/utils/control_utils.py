@@ -19,6 +19,8 @@
 
 import logging
 import traceback
+from collections import deque
+from collections.abc import Callable
 from contextlib import nullcontext
 from copy import copy
 from functools import cache
@@ -91,6 +93,14 @@ def _build_spark3_default_action_from_observation(observation: dict[str, Any]) -
     from lerobot.robots.spark3_pose_gripper.schema import action_dict_from_observation
 
     return action_dict_from_observation(observation)
+
+
+def _format_arm_pose(action: dict[str, float], arm: str) -> str:
+    return "(%.4f, %.4f, %.4f)" % (
+        action.get(f"main_{arm}_x", float("nan")),
+        action.get(f"main_{arm}_y", float("nan")),
+        action.get(f"main_{arm}_z", float("nan")),
+    )
 
 
 def _ensure_online_sidecar_batch_dims(
@@ -167,29 +177,133 @@ def _maybe_convert_pi05_canonical_action_to_robot_action(
             except ValueError:
                 arm_valid = None
 
-    robot_action = _build_spark3_default_action_from_observation(raw_observation)
-    robot_action.update(
-        canonical_bimanual_action_to_pose_gripper_dict(
-            action_tensor,
-            arm_valid=arm_valid,
-        )
+    converted_action = canonical_bimanual_action_to_pose_gripper_dict(
+        action_tensor,
+        arm_valid=arm_valid,
     )
+    robot_action = _build_spark3_default_action_from_observation(raw_observation)
+    robot_action.update(converted_action)
     print(
-        "[pi05-action-debug] arm_valid=%s main_left=(%.4f, %.4f, %.4f) main_right=(%.4f, %.4f, %.4f) gripper=(%.4f, %.4f)"
+        "[pi05-action-debug] arm_valid=%s updated_keys=%s left=%s right=%s gripper=(%.4f, %.4f)"
         % (
             arm_valid,
-            robot_action.get("main_left_x", float("nan")),
-            robot_action.get("main_left_y", float("nan")),
-            robot_action.get("main_left_z", float("nan")),
-            robot_action.get("main_right_x", float("nan")),
-            robot_action.get("main_right_y", float("nan")),
-            robot_action.get("main_right_z", float("nan")),
+            sorted(converted_action.keys()),
+            _format_arm_pose(converted_action, "left"),
+            _format_arm_pose(converted_action, "right"),
             robot_action.get("main_gripper_left", float("nan")),
             robot_action.get("main_gripper_right", float("nan")),
         ),
         flush=True,
     )
     return robot_action
+
+
+def _should_decode_action_chunks_with_shared_reference(
+    policy: PreTrainedPolicy,
+    action_override: Callable[[dict[str, Any]], PolicyAction] | None,
+) -> bool:
+    return (
+        action_override is None
+        and bool(getattr(policy.config, "use_relative_actions", False))
+        and int(getattr(policy.config, "n_action_steps", 1)) > 1
+    )
+
+
+def _is_chunk_action_tensor(action: PolicyAction) -> bool:
+    return isinstance(action, torch.Tensor) and action.ndim == 3
+
+
+def _get_processed_action_queue(policy: PreTrainedPolicy) -> deque[PolicyAction]:
+    queue = getattr(policy, "_lerobot_processed_action_queue", None)
+    if queue is None:
+        queue = deque(maxlen=max(1, int(getattr(policy.config, "n_action_steps", 1))))
+        setattr(policy, "_lerobot_processed_action_queue", queue)
+    return queue
+
+
+def _split_postprocessed_chunk(processed_chunk: PolicyAction) -> list[PolicyAction]:
+    if not isinstance(processed_chunk, torch.Tensor):
+        raise TypeError(
+            "Chunked relative-action decoding currently expects the postprocessor to return a tensor, "
+            f"got {type(processed_chunk)!r}."
+        )
+
+    if processed_chunk.ndim == 2:
+        return [processed_chunk]
+    if processed_chunk.ndim != 3:
+        raise ValueError(
+            "Chunked relative-action decoding expects a tensor with shape (B, T, D) or (B, D), "
+            f"got {tuple(processed_chunk.shape)}."
+        )
+    return [processed_chunk[:, step_idx, :] for step_idx in range(processed_chunk.shape[1])]
+
+
+def _predict_action_with_shared_reference_chunk(
+    *,
+    observation: dict[str, Any],
+    raw_observation: dict[str, Any],
+    prepared_observation: dict[str, Any] | None,
+    policy: PreTrainedPolicy,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    robot_type: str | None,
+) -> PolicyAction:
+    queue = _get_processed_action_queue(policy)
+    if queue:
+        return queue.popleft()
+
+    raw_chunk = policy.predict_action_chunk(observation)[:, : policy.config.n_action_steps]
+    processed_chunk = postprocessor(raw_chunk)
+
+    for step_action in _split_postprocessed_chunk(processed_chunk):
+        queue.append(
+            _maybe_convert_pi05_canonical_action_to_robot_action(
+                action=step_action,
+                raw_observation=raw_observation,
+                prepared_observation=prepared_observation,
+                policy=policy,
+                preprocessor=preprocessor,
+                robot_type=robot_type,
+            )
+        )
+
+    if not queue:
+        raise RuntimeError("Policy returned an empty action chunk after shared-reference decoding.")
+
+    return queue.popleft()
+
+
+def _decode_override_chunk_with_shared_reference(
+    *,
+    raw_chunk: PolicyAction,
+    raw_observation: dict[str, Any],
+    prepared_observation: dict[str, Any] | None,
+    policy: PreTrainedPolicy,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    robot_type: str | None,
+) -> PolicyAction:
+    queue = _get_processed_action_queue(policy)
+    if queue:
+        return queue.popleft()
+
+    processed_chunk = postprocessor(raw_chunk)
+    for step_action in _split_postprocessed_chunk(processed_chunk):
+        queue.append(
+            _maybe_convert_pi05_canonical_action_to_robot_action(
+                action=step_action,
+                raw_observation=raw_observation,
+                prepared_observation=prepared_observation,
+                policy=policy,
+                preprocessor=preprocessor,
+                robot_type=robot_type,
+            )
+        )
+
+    if not queue:
+        raise RuntimeError("Manual action override returned an empty action chunk after shared-reference decoding.")
+
+    return queue.popleft()
 
 
 def predict_action(
@@ -202,6 +316,7 @@ def predict_action(
     task: str | None = None,
     robot_type: str | None = None,
     raw_observation: dict[str, Any] | None = None,
+    action_override: Callable[[dict[str, Any]], PolicyAction] | None = None,
 ):
     """
     Performs a single-step inference to predict a robot action from an observation.
@@ -209,7 +324,8 @@ def predict_action(
     This function encapsulates the full inference pipeline:
     1. Prepares the observation by converting it to PyTorch tensors and adding a batch dimension.
     2. Runs the preprocessor pipeline on the observation.
-    3. Feeds the processed observation to the policy to get a raw action.
+    3. Feeds the processed observation to the policy to get a raw action, unless
+       `action_override` is provided, in which case the override is used instead.
     4. Runs the postprocessor pipeline on the raw action.
     5. Formats the final action by removing the batch dimension and moving it to the CPU.
 
@@ -230,6 +346,7 @@ def predict_action(
     observation = copy(observation)
     raw_observation = copy(raw_observation) if raw_observation is not None else copy(observation)
     prepared_observation = None
+    action_is_final = False
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
@@ -250,20 +367,46 @@ def predict_action(
         prepared_observation = observation
         observation = preprocessor(observation)
 
-        # Compute the next action with the policy
-        # based on the current observation
-        action = policy.select_action(observation)
+        # Compute the next action either from the policy or from a manual override
+        # that mimics the raw model output format before post-processing.
+        if action_override is not None:
+            action = action_override(prepared_observation)
+            if _is_chunk_action_tensor(action):
+                action = _decode_override_chunk_with_shared_reference(
+                    raw_chunk=action,
+                    raw_observation=raw_observation,
+                    prepared_observation=prepared_observation,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    robot_type=robot_type,
+                )
+                action_is_final = True
+        elif _should_decode_action_chunks_with_shared_reference(policy, action_override):
+            action = _predict_action_with_shared_reference_chunk(
+                observation=observation,
+                raw_observation=raw_observation,
+                prepared_observation=prepared_observation,
+                policy=policy,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                robot_type=robot_type,
+            )
+            action_is_final = True
+        else:
+            action = policy.select_action(observation)
+        if not action_is_final:
+            action = postprocessor(action)
 
-        action = postprocessor(action)
-
-    action = _maybe_convert_pi05_canonical_action_to_robot_action(
-        action=action,
-        raw_observation=raw_observation,
-        prepared_observation=prepared_observation,
-        policy=policy,
-        preprocessor=preprocessor,
-        robot_type=robot_type,
-    )
+    if not action_is_final:
+        action = _maybe_convert_pi05_canonical_action_to_robot_action(
+            action=action,
+            raw_observation=raw_observation,
+            prepared_observation=prepared_observation,
+            policy=policy,
+            preprocessor=preprocessor,
+            robot_type=robot_type,
+        )
 
     return action
 

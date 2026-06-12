@@ -1613,6 +1613,8 @@ class PI05FullPolicy(PreTrainedPolicy):
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
+        if hasattr(self, "_lerobot_processed_action_queue"):
+            self._lerobot_processed_action_queue = deque(maxlen=self.config.n_action_steps)
         self._cached_subtask_tokens: Tensor | None = None
         self._cached_subtask_masks: Tensor | None = None
         self._cached_subtask_prompt_tokens: Tensor | None = None
