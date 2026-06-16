@@ -38,6 +38,7 @@ class PI05FullConfig(PreTrainedConfig):
     n_action_steps: int = 50  # Number of action steps to execute
     action_gap_frames: int = 0  # Future action offset applied before chunk sampling
     action_gap_dataset_overrides: list[str] = field(default_factory=list)
+    apply_action_gap_to_real_datasets: bool = False
 
     # Shorter state and action vectors will be padded to these dimensions
     max_state_dim: int = 32

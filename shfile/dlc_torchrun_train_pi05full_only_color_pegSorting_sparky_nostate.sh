@@ -57,7 +57,8 @@ LOG_FREQ="${LOG_FREQ:-20}"
 SAVE_FREQ="${SAVE_FREQ:-5000}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
 
-ACTION_GAP_FRAMES="${ACTION_GAP_FRAMES:-6}"
+ACTION_GAP_FRAMES="${ACTION_GAP_FRAMES:-10}"
+APPLY_ACTION_GAP_TO_REAL_DATASETS="${APPLY_ACTION_GAP_TO_REAL_DATASETS:-true}"
 RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
 RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
 RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
@@ -149,6 +150,7 @@ echo "[info] tokenizer_name=${TOKENIZER_NAME}"
 echo "[info] batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS}"
 echo "[info] steps=${MAX_STEPS} save_freq=${SAVE_FREQ} eval_freq=${EVAL_FREQ}"
 echo "[info] action_gap_frames=${ACTION_GAP_FRAMES}"
+echo "[info] apply_action_gap_to_real_datasets=${APPLY_ACTION_GAP_TO_REAL_DATASETS}"
 echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
 echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
 echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
@@ -193,6 +195,7 @@ torchrun \
     --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
     --policy.relative_exclude_joints="${RELATIVE_EXCLUDE_JOINTS}" \
     --policy.action_gap_frames="${ACTION_GAP_FRAMES}" \
+    --policy.apply_action_gap_to_real_datasets="${APPLY_ACTION_GAP_TO_REAL_DATASETS}" \
     --policy.loss_weight_flow="${LOSS_WEIGHT_FLOW}" \
     --policy.loss_weight_subtask_ce="${LOSS_WEIGHT_SUBTASK_CE}" \
     --policy.canonicalize_bimanual_rot6d=false \

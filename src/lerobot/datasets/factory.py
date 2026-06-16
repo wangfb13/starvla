@@ -236,6 +236,9 @@ def _apply_automatic_action_gap_overrides(
     if not hasattr(policy_cfg, "action_gap_dataset_overrides"):
         return
 
+    if bool(getattr(policy_cfg, "apply_action_gap_to_real_datasets", False)):
+        return
+
     explicit_indices = _explicit_action_gap_override_indices(policy_cfg)
     auto_specs: list[str] = []
     for dataset_index, ds_meta in indexed_metas:
