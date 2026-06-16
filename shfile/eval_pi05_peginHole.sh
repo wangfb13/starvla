@@ -36,6 +36,6 @@ python src/lerobot/scripts/lerobot_record.py \
   --policy.path=./outputs/pi05_peg_in_hole_200/30000/pretrained_model \
   --policy.device=cuda \
   --policy.use_amp=true \
-  --interpolation_multiplier=2
+  --interpolation_multiplier=1
 
 #   --policy.tokenizer_name=/home/lunar/Desktop/paligemma-3b-pt-224 \

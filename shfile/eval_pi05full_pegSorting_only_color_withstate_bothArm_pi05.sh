@@ -59,8 +59,10 @@ python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
   --dataset.reset_time_s=5 \
   --dataset.single_task="pick up the peg and place it into the correct box" \
   --dataset.streaming_encoding=true \
+  --dataset.vcodec=libsvtav1 \
+  --dataset.encoder_threads=2 \
   --dataset.rename_map='{"observation.images.cam_right_wrist":"observation.images.cam_right", "observation.images.cam_left_wrist":"observation.images.cam_left"}' \
   --policy.path="${POLICY_PATH}" \
   --policy.device=cuda \
   --policy.use_amp=true \
-  --interpolation_multiplier=2
+  --interpolation_multiplier=1

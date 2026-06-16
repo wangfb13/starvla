@@ -807,6 +807,27 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
         logging.info("Disabled gradient checkpointing for PI05Pytorch model")
 
+    @staticmethod
+    def _reset_module_parameters(module: nn.Module) -> None:
+        reset_parameters = getattr(module, "reset_parameters", None)
+        if callable(reset_parameters):
+            reset_parameters()
+
+    def reset_action_expert_parameters(self) -> None:
+        """Reinitialize action-specific modules after loading a warm-start checkpoint."""
+        self.paligemma_with_expert.gemma_expert.apply(self._reset_module_parameters)
+        for module in (
+            self.action_in_proj,
+            self.action_out_proj,
+            self.time_mlp_in,
+            self.time_mlp_out,
+        ):
+            self._reset_module_parameters(module)
+        logging.info(
+            "Reinitialized PI05Full action expert modules: gemma_expert, action_in_proj, "
+            "action_out_proj, time_mlp_in, time_mlp_out"
+        )
+
     def _rtc_enabled(self):
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
@@ -1539,6 +1560,9 @@ class PI05FullPolicy(PreTrainedPolicy):
 
         except Exception as e:
             print(f"Warning: Could not load state dict: {e}")
+
+        if getattr(model.config, "reset_action_expert_after_pretrained_load", False):
+            model.model.reset_action_expert_parameters()
 
         return model
 

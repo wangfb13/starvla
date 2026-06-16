@@ -136,6 +136,7 @@ class PI05FullConfig(PreTrainedConfig):
     # Finetuning settings
     freeze_vision_encoder: bool = False  # Freeze only the vision encoder
     train_expert_only: bool = False  # Freeze entire VLM, train only action expert and projections
+    reset_action_expert_after_pretrained_load: bool = False
     loss_weight_flow: float = 1.0
     loss_weight_subtask_ce: float = 1.0
 

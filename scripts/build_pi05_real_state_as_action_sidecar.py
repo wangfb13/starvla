@@ -146,8 +146,11 @@ def build_state_action_from_state_only(
     real_mask_arm: str,
 ) -> dict[str, np.ndarray]:
     source_state_names = list(info["features"][OBS_STATE]["names"])
+    source_action_names = list(info["features"][ACTION]["names"])
     state_index = {name: idx for idx, name in enumerate(source_state_names)}
+    action_index = {name: idx for idx, name in enumerate(source_action_names)}
     state_matrix = np.stack(frame_df[OBS_STATE].to_numpy()).astype(np.float32)
+    action_matrix = np.stack(frame_df[ACTION].to_numpy()).astype(np.float32)
     episode_ids = frame_df["episode_index"].to_numpy(dtype=np.int64)
 
     state_arms: list[np.ndarray] = []
@@ -179,11 +182,18 @@ def build_state_action_from_state_only(
         state_arm_mask = np.concatenate([compact_state_pose_valid, grip_state_valid], axis=1).astype(np.float32)
         state_present = (compact_state_pose_valid.all(axis=1) | grip_state_valid.all(axis=1)).astype(np.float32)
 
+        grip_action, grip_action_valid = take_columns(
+            action_matrix,
+            action_index,
+            [GRIPPER_NAMES[arm]],
+            missing_value=missing_value,
+        )
+
         action_arm, action_mask = build_arm_absolute_targets(
             compact_pose=compact_state_pose,
             compact_pose_valid=compact_state_pose_valid,
-            gripper=grip_state,
-            gripper_valid=grip_state_valid,
+            gripper=grip_action,
+            gripper_valid=grip_action_valid,
         )
 
         if real_mask_arm == arm:
@@ -342,7 +352,7 @@ def build_sidecar_for_dataset(
         "schema_name": schema_name,
         "real_mask_arm": real_mask_arm,
         "state_source": "raw_observation_state",
-        "action_source": "raw_observation_state",
+        "action_source": "raw_observation_state_pose_plus_raw_action_gripper",
         "sidecar_path": str(sidecar_path),
         "stats_path": str(stats_output_path),
         "relative_stats_path": str(relative_stats_path) if relative_stats_path is not None else None,
@@ -351,7 +361,7 @@ def build_sidecar_for_dataset(
         "canonical_state_dim": CANONICAL_STATE_DIM,
         "canonical_action_dim": CANONICAL_ACTION_DIM,
         "state_pose_mode": "absolute_rot6d",
-        "action_target_mode": "state_reused_as_action_absolute_rot6d_gripper_framewise",
+        "action_target_mode": "state_pose_reused_as_action_absolute_rot6d_with_raw_action_gripper_framewise",
         "missing_value": missing_value,
         "left_arm_present_ratio": float(canonical["left_present"].mean()),
         "right_arm_present_ratio": float(canonical["right_present"].mean()),

@@ -9,14 +9,14 @@ scripts/build_pi05_real_state_as_action_sidecar.py
 这个脚本专门处理真机数据，核心逻辑和普通 canonical sidecar 不一样：
 
 - sidecar 里的 `observation.state` 来自原始数据的 `observation.state`
-- sidecar 里的 `action` 也来自原始数据的 `observation.state`
+- sidecar 里的 `action` 采用混合来源：末端位姿来自原始 `observation.state`，gripper 来自原始 `action`
 - 支持通过参数直接 mask 掉左臂或右臂
 
-也就是说，这个脚本不会使用原始数据里的 `action` 字段来构造训练目标，而是走一套：
+也就是说，这个脚本不会直接复用原始数据里的 `action` 全量来构造训练目标，而是走一套：
 
 ```text
 raw observation.state -> canonical state
-raw observation.state -> canonical action
+raw observation.state pose + raw action gripper -> canonical action
 ```
 
 适合你想做“用当前状态本身作为监督目标”这类真机实验。
@@ -74,12 +74,12 @@ left 10D + right 10D + left_valid + right_valid
 left 10D + right 10D
 ```
 
-这里的 `action` 不是原始数据里的 `action`，而是由原始 `observation.state` 直接转换得到。
+这里的 `action` 不是原始数据里的 `action` 全量，而是由原始 `observation.state` 和原始 `action` 混合构造得到。
 
 因此它表达的是：
 
 ```text
-当前帧 state 对应的 canonical 双臂 pose + gripper
+当前帧 state 对应的 canonical 双臂 pose + 原始 action 里的 gripper
 ```
 
 ### 2.3 其他辅助字段
@@ -122,12 +122,13 @@ meta/info.json -> robot_type == spark3_pose_gripper
 区别在于：
 
 - `state` 用原始 `observation.state`
-- `action` 也用原始 `observation.state`
+- `action` 的末端位姿用原始 `observation.state`
+- `action` 的 gripper 用原始 `action`
 
 可以把它理解成：
 
 ```text
-sidecar_action = sidecar_state[:20]
+sidecar_action = concat(state_pose_rot6d, raw_action_gripper)
 ```
 
 只是实际实现时会分别根据左右臂 pose/gripper 的有效性去构造 mask。
@@ -196,6 +197,13 @@ python3 scripts/build_pi05_real_state_as_action_sidecar.py \
   --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_pegSorting_roots.txt \
   --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_pegSorting_sparky_onlyRightArm_stateAsAction \
   --real-mask-arm left \
+  --overwrite
+
+
+python3 scripts/build_pi05_real_state_as_action_sidecar.py \
+  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_roots.txt \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction \
+  --real-mask-arm none \
   --overwrite
 ```
 
@@ -268,15 +276,15 @@ sidecar action <- raw action
 
 ```text
 sidecar state <- raw state
-sidecar action <- raw state
+sidecar action <- raw state pose + raw action gripper
 ```
 
 所以它更像是在做：
 
-- state reconstruction 风格监督
-- current-state-as-target 风格监督
+- state pose reconstruction 风格监督
+- current-state-pose-as-target + raw-gripper 风格监督
 
-而不是学习原始控制 action。
+而不是直接学习原始控制 action 的完整 20D 向量。
 
 ## 10. 结果检查建议
 
@@ -284,9 +292,10 @@ sidecar action <- raw state
 
 - `summary.json`
   - 看 `real_mask_arm` 是否符合预期
-  - 看 `state_source` 和 `action_source` 是否都是 `raw_observation_state`
+  - 看 `state_source` 是否是 `raw_observation_state`
+  - 看 `action_source` 是否是 `raw_observation_state_pose_plus_raw_action_gripper`
 - `framewise_guidance.parquet`
-  - 抽几帧确认 `observation.state` 和 `action` 是否确实来自同一帧 state
+  - 抽几帧确认 `action` 的 pose 是否来自同一帧 `state`，gripper 是否来自同一帧原始 `action`
 - `action_valid_mask`
   - 确认被 mask 的那一侧是否已经变成全 0
 
@@ -296,4 +305,3 @@ sidecar action <- raw state
 - `policy.max_state_dim`
 - `policy.max_action_dim`
 - `policy.canonicalize_bimanual_rot6d`
-

@@ -44,9 +44,11 @@ python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
   --dataset.episode_time_s=600 \
   --dataset.reset_time_s=5 \
   --dataset.single_task="sort the peg into the correct hole" \
-  --dataset.streaming_encoding=false \
+  --dataset.streaming_encoding=true \
+  --dataset.vcodec=libsvtav1 \
+  --dataset.encoder_threads=2 \
   --dataset.rename_map='{"observation.images.cam_right_wrist":"observation.images.cam_right"}' \
   --policy.path="${POLICY_PATH}" \
   --policy.device=cuda \
   --policy.use_amp=true \
-  --interpolation_multiplier=2
+  --interpolation_multiplier=1
