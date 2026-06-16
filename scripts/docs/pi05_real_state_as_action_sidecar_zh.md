@@ -186,9 +186,16 @@ python3 scripts/build_pi05_real_state_as_action_sidecar.py \
 
 ```bash
 python3 scripts/build_pi05_real_state_as_action_sidecar.py \
+  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_roots.txt \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction \
+  --real-mask-arm none \
+  --overwrite
+
+
+python3 scripts/build_pi05_real_state_as_action_sidecar.py \
   --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_pegSorting_roots.txt \
-  --output-root /mnt/cpfs/repo/pi05_real_state_as_action_sidecars \
-  --real-mask-arm right \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_pegSorting_sparky_onlyRightArm_stateAsAction \
+  --real-mask-arm left \
   --overwrite
 ```
 
