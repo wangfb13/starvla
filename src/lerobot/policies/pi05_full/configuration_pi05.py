@@ -118,6 +118,7 @@ class PI05FullConfig(PreTrainedConfig):
     max_decoding_steps: int = 200
     temperature: float = 0.0
     subtask_regeneration_interval: float = 1.0
+    enable_subtask_branch: bool = True
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {

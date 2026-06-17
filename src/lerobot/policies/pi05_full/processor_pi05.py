@@ -202,6 +202,7 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
     max_state_dim: int = 32
     task_key: str = "task"
     use_state_input: bool = True
+    enable_subtask_branch: bool = True
     user_prompt_key: str = "user_prompt"
     command_key: str = "next_subtask"
     fallback_command_to_task: bool = True
@@ -286,6 +287,18 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
         complementary_data[self.task_key] = make_prompt_batch(task_texts)
         complementary_data[self.user_prompt_key] = make_prompt_batch(user_prompt_texts)
 
+        if not self.enable_subtask_branch:
+            for key in (
+                self.command_key,
+                "subtask",
+                "next_subtask",
+                "next_subtask_text_sidecar",
+                "subtask_text_sidecar",
+                PI05_FULL_SUBTASK_IS_FALLBACK_KEY,
+            ):
+                complementary_data.pop(key, None)
+            return transition
+
         commands = self._optional_text_batch(complementary_data.get(self.command_key), self.command_key)
         resolved_command_key = self.command_key if commands is not None else None
         if commands is None:
@@ -319,6 +332,7 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
             "max_state_dim": self.max_state_dim,
             "task_key": self.task_key,
             "use_state_input": self.use_state_input,
+            "enable_subtask_branch": self.enable_subtask_branch,
             "user_prompt_key": self.user_prompt_key,
             "command_key": self.command_key,
             "fallback_command_to_task": self.fallback_command_to_task,
@@ -407,6 +421,7 @@ def make_pi05_full_pre_post_processors(
             Pi05PrepareStateTokenizerProcessorStep(
                 max_state_dim=config.max_state_dim,
                 use_state_input=config.use_state_input,
+                enable_subtask_branch=config.enable_subtask_branch,
             ),
             TokenizerProcessorStep(
                 tokenizer_name=config.tokenizer_name,

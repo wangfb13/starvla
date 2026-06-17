@@ -939,7 +939,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         embs.append(lang_emb)
 
         subtask_pad_mask = None
-        if subtask_tokens is not None and subtask_masks is not None:
+        if self.config.enable_subtask_branch and subtask_tokens is not None and subtask_masks is not None:
             def subtask_embed_func(subtask_tokens):
                 subtask_emb = self.paligemma_with_expert.embed_language_tokens(subtask_tokens)
                 subtask_emb_dim = subtask_emb.shape[-1]
@@ -1102,7 +1102,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             flow_losses = flow_losses * action_mask
 
         subtask_ce_loss = torch.zeros(actions.shape[0], device=actions.device, dtype=torch.float32)
-        if subtask_tokens is not None and subtask_masks is not None:
+        use_subtask_branch = self.config.enable_subtask_branch and subtask_tokens is not None and subtask_masks is not None
+        if use_subtask_branch:
             lm_head = self.paligemma_with_expert.paligemma.lm_head
             language_len = tokens.shape[1]
             subtask_len = subtask_tokens.shape[1]
@@ -2025,6 +2026,9 @@ class PI05FullPolicy(PreTrainedPolicy):
         batch_size: int,
         device: torch.device,
     ) -> tuple[Tensor | None, Tensor | None, Tensor]:
+        if not self.config.enable_subtask_branch:
+            fallback_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            return None, None, fallback_mask
         subtask_tokens, subtask_masks = self.get_subtask_inputs(batch)
         if (subtask_tokens is None) != (subtask_masks is None):
             raise ValueError("subtask tokens and attention masks must either both be present or both be absent.")
@@ -2071,6 +2075,8 @@ class PI05FullPolicy(PreTrainedPolicy):
         tactile_token_masks: Tensor | None = None,
         tactile_role_metadata: dict[str, Tensor] | None = None,
     ) -> tuple[Tensor, Tensor]:
+        if not self.config.enable_subtask_branch:
+            raise RuntimeError("Subtask branch is disabled in pi05_full config; generation should not be called.")
         current_time = time.time()
         if self._should_regenerate_subtasks(tokens, masks, current_time):
             self._ensure_paligemma_tokenizer()
@@ -2109,6 +2115,8 @@ class PI05FullPolicy(PreTrainedPolicy):
         tactile_token_masks: Tensor | None = None,
         tactile_role_metadata: dict[str, Tensor] | None = None,
     ) -> tuple[Tensor | None, Tensor | None]:
+        if not self.config.enable_subtask_branch:
+            return None, None
         batch_size = tokens.shape[0]
         explicit_tokens, explicit_masks, fallback_mask = self._resolve_subtask_inputs(
             batch,
@@ -2170,16 +2178,19 @@ class PI05FullPolicy(PreTrainedPolicy):
         tactile_tokens, tactile_token_masks, tactile_role_metadata = self._prepare_tactile(batch)
         tokens, masks = self.get_language_inputs(batch)
         action_mask = self.prepare_action_mask(batch)
-        subtask_tokens, subtask_masks = self._select_inference_subtasks(
-            batch,
-            images,
-            img_masks,
-            tokens,
-            masks,
-            tactile_tokens=tactile_tokens,
-            tactile_token_masks=tactile_token_masks,
-            tactile_role_metadata=tactile_role_metadata,
-        )
+        subtask_tokens = None
+        subtask_masks = None
+        if self.config.enable_subtask_branch:
+            subtask_tokens, subtask_masks = self._select_inference_subtasks(
+                batch,
+                images,
+                img_masks,
+                tokens,
+                masks,
+                tactile_tokens=tactile_tokens,
+                tactile_token_masks=tactile_token_masks,
+                tactile_role_metadata=tactile_role_metadata,
+            )
 
         # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
         actions = self.model.sample_actions(
@@ -2220,7 +2231,7 @@ class PI05FullPolicy(PreTrainedPolicy):
         images, img_masks = self._preprocess_images(batch)
         tactile_tokens, tactile_token_masks, tactile_role_metadata = self._prepare_tactile(batch)
         tokens, masks = self.get_language_inputs(batch)
-        subtask_tokens, subtask_masks = self.get_subtask_inputs(batch)
+        subtask_tokens, subtask_masks = self.get_subtask_inputs(batch) if self.config.enable_subtask_branch else (None, None)
 
         actions = self.prepare_action(batch)
         action_mask = self.prepare_action_mask(batch)
@@ -2245,8 +2256,8 @@ class PI05FullPolicy(PreTrainedPolicy):
             masks,
             actions,
             action_mask=action_mask,
-            subtask_tokens=subtask_tokens,
-            subtask_masks=subtask_masks,
+            subtask_tokens=subtask_tokens if self.config.enable_subtask_branch else None,
+            subtask_masks=subtask_masks if self.config.enable_subtask_branch else None,
             tactile_tokens=tactile_tokens,
             tactile_token_masks=tactile_token_masks,
             tactile_role_metadata=tactile_role_metadata,

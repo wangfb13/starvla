@@ -14,10 +14,12 @@ fi
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export HF_HOME="${HF_HOME:-/mnt/tacumi_data/huggingface}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/hf_datasets/${JOB_NAME}/node${RANK}}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+mkdir -p "${HF_DATASETS_CACHE}"
 if [[ -n "${CONDA_PREFIX:-}" ]]; then
   export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 fi
@@ -63,6 +65,7 @@ RELATIVE_ACTION_KEYFRAMES="${RELATIVE_ACTION_KEYFRAMES:-[\"0:3\",\"10:13\"]}"
 RELATIVE_EXCLUDE_KEYS="${RELATIVE_EXCLUDE_KEYS:-[]}"
 RELATIVE_EXCLUDE_JOINTS="${RELATIVE_EXCLUDE_JOINTS:-[]}"
 USE_STATE_INPUT="${USE_STATE_INPUT:-true}"
+ENABLE_SUBTASK_BRANCH="${ENABLE_SUBTASK_BRANCH:-true}"
 LOSS_WEIGHT_FLOW="${LOSS_WEIGHT_FLOW:-1.0}"
 LOSS_WEIGHT_SUBTASK_CE="${LOSS_WEIGHT_SUBTASK_CE:-1.0}"
 RESET_ACTION_EXPERT_AFTER_PRETRAINED_LOAD="${RESET_ACTION_EXPERT_AFTER_PRETRAINED_LOAD:-false}"
@@ -148,6 +151,7 @@ echo "[info] sidecar_root=${CANONICAL_SIDECAR_ROOT}"
 echo "[info] info_path=${INFO_PATH}"
 echo "[info] pretrained_path=${PRETRAINED_PATH}"
 echo "[info] tokenizer_name=${TOKENIZER_NAME}"
+echo "[info] hf_datasets_cache=${HF_DATASETS_CACHE}"
 echo "[info] batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS}"
 echo "[info] steps=${MAX_STEPS} save_freq=${SAVE_FREQ} eval_freq=${EVAL_FREQ}"
 echo "[info] action_gap_frames=${ACTION_GAP_FRAMES}"
@@ -156,6 +160,7 @@ echo "[info] relative_action_keyframes=${RELATIVE_ACTION_KEYFRAMES}"
 echo "[info] relative_exclude_keys=${RELATIVE_EXCLUDE_KEYS}"
 echo "[info] relative_exclude_joints=${RELATIVE_EXCLUDE_JOINTS}"
 echo "[info] use_state_input=${USE_STATE_INPUT}"
+echo "[info] enable_subtask_branch=${ENABLE_SUBTASK_BRANCH}"
 echo "[info] loss_weight_flow=${LOSS_WEIGHT_FLOW}"
 echo "[info] loss_weight_subtask_ce=${LOSS_WEIGHT_SUBTASK_CE}"
 echo "[info] reset_action_expert_after_pretrained_load=${RESET_ACTION_EXPERT_AFTER_PRETRAINED_LOAD}"
@@ -193,6 +198,7 @@ torchrun \
     --policy.tokenizer_name="${TOKENIZER_NAME}" \
     --policy.use_relative_actions=true \
     --policy.use_state_input="${USE_STATE_INPUT}" \
+    --policy.enable_subtask_branch="${ENABLE_SUBTASK_BRANCH}" \
     --policy.reset_action_expert_after_pretrained_load="${RESET_ACTION_EXPERT_AFTER_PRETRAINED_LOAD}" \
     --policy.relative_action_keyframes="${RELATIVE_ACTION_KEYFRAMES}" \
     --policy.relative_exclude_keys="${RELATIVE_EXCLUDE_KEYS}" \
