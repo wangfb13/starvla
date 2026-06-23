@@ -35,6 +35,7 @@ class DmTactileCameraX5Config(CameraConfig):
     rotation: int | None = None
     roi: list[list[int]] | None = None
     warmup_s: int = 1
+    inference_mode: bool = False
     mock: bool = False
 
     def __post_init__(self) -> None:
@@ -72,4 +73,3 @@ class DmTactileCameraX5Config(CameraConfig):
             raise ValueError(
                 "At least one tactile side must be configured. Set `left_serial_number` or `right_serial_number`."
             )
-

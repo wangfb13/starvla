@@ -53,8 +53,9 @@ robot:
     #   left_serial_number: X25510037
     #   right_serial_number: X26040064
     #   fps: 30
-    #   width: 640
-    #   height: 480
+    #   width: 128
+    #   height: 96
+    #   inference_mode: true
 
     # cam_left_gripper_tactile:
     #   type: dmTactileX5
@@ -62,8 +63,9 @@ robot:
     #   left_serial_number: X26040023
     #   right_serial_number: X26040213
     #   fps: 30
-    #   width: 640
-    #   height: 480
+    #   width: 128
+    #   height: 96
+    #   inference_mode: true
 
   # Optional scalar/array ROS topics that should be recorded into the dataset.
   # sensors:

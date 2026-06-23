@@ -306,18 +306,16 @@ def make_pre_post_processors(
             pi05_prompt_overrides = preprocessor_overrides.setdefault(
                 "pi05_prepare_state_tokenizer_processor_step", {}
             )
-            pi05_prompt_overrides.setdefault(
-                "use_state_input",
-                getattr(policy_cfg, "use_state_input", True),
-            )
+            pi05_prompt_overrides["use_state_input"] = getattr(policy_cfg, "use_state_input", True)
         elif isinstance(policy_cfg, PI05FullConfig):
             pi05_full_prompt_overrides = preprocessor_overrides.setdefault(
                 "pi05_full_prepare_state_tokenizer_processor_step", {}
             )
-            pi05_full_prompt_overrides.setdefault(
-                "use_state_input",
-                getattr(policy_cfg, "use_state_input", True),
+            pi05_full_prompt_overrides["use_state_input"] = getattr(policy_cfg, "use_state_input", True)
+            pi05_full_prompt_overrides["enable_subtask_branch"] = getattr(
+                policy_cfg, "enable_subtask_branch", True
             )
+            kwargs["preprocessor_overrides"] = preprocessor_overrides
 
         if isinstance(policy_cfg, PI05Config) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
             # Older saved PI0.5 preprocessors may omit canonical source feature names.

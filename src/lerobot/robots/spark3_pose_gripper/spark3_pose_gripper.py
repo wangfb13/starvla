@@ -444,6 +444,20 @@ class Spark3PoseGripper(Robot):
 
         command = dict(self._last_action)
         command.update(action)
+        print(
+            "[spark3-send-action] left=(%.4f, %.4f, %.4f) right=(%.4f, %.4f, %.4f) gripper=(%.4f, %.4f)"
+            % (
+                command.get("main_left_x", float("nan")),
+                command.get("main_left_y", float("nan")),
+                command.get("main_left_z", float("nan")),
+                command.get("main_right_x", float("nan")),
+                command.get("main_right_y", float("nan")),
+                command.get("main_right_z", float("nan")),
+                command.get("main_gripper_left", float("nan")),
+                command.get("main_gripper_right", float("nan")),
+            ),
+            flush=True,
+        )
         self._wbc_goal_publisher.publish(self._build_command_message(command))
 
         for name, handle in self._end_effector_handles.items():

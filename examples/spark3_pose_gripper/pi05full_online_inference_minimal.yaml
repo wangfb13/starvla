@@ -1,0 +1,120 @@
+# Minimal Spark3 online inference observation example for pi05_full.
+#
+# Purpose:
+# - This file shows the minimal raw Spark observation structure that the current
+#   synchronous/asynchronous inference path can consume.
+# - The runtime will build the 22-dim canonical state, 20-dim action/state mask,
+#   and tactile-present masks online from these raw fields.
+#
+# Important:
+# - The keys below are raw robot observation keys, not sidecar keys.
+# - Image values here are placeholders. Replace them with real uint8 HWC arrays.
+# - If you mask one arm, the safest way is to provide `arm_present_mask`.
+#
+# Suggested file usage:
+# - Keep this file as a field checklist for online service integration.
+# - Do not load it directly as model input without replacing image placeholders.
+
+meta:
+  robot_type: spark3_pose_gripper
+  policy_type: pi05_full
+  canonicalize_bimanual_rot6d: false
+  source_record_config: examples/spark3_pose_gripper/record.yaml
+  cameras_from_record_yaml:
+    - cam_top
+    - cam_right_wrist
+    - cam_left_wrist
+  optional_tactile_cameras_from_record_yaml:
+    - cam_right_gripper_tactile
+    - cam_left_gripper_tactile
+
+# Case 1:
+# - No tactile model, or tactile disabled at inference time.
+# - Example below masks the left arm and keeps the right arm active.
+raw_observation_minimal_no_tactile:
+  main_left_x: 0.19165
+  main_left_y: 0.222878
+  main_left_z: 1.130936
+  main_left_qx: -0.011698
+  main_left_qy: -0.701645
+  main_left_qz: 0.054166
+  main_left_w: 0.710369
+
+  main_right_x: 0.19165
+  main_right_y: -0.221378
+  main_right_z: 1.130936
+  main_right_qx: 0.011698
+  main_right_qy: -0.701645
+  main_right_qz: -0.054166
+  main_right_w: 0.710369
+
+  main_gripper_left: 0.0
+  main_gripper_right: 0.0
+
+  # [left_present, right_present]
+  arm_present_mask: [0.0, 1.0]
+
+  # Replace these placeholders with real uint8 HWC image arrays.
+  cam_top: "__uint8_image_hwc_480x640x3__"
+  cam_right_wrist: "__uint8_image_hwc_1080x1920x3__"
+  cam_left_wrist: "__uint8_image_hwc_1080x1920x3__"
+
+# Case 2:
+# - Tactile model enabled.
+# - If tactile frames exist, runtime can infer `observation.tactile_present`.
+# - You may still pass tactile masks explicitly if your upstream service already knows them.
+raw_observation_minimal_with_tactile:
+  main_left_x: 0.19165
+  main_left_y: 0.222878
+  main_left_z: 1.130936
+  main_left_qx: -0.011698
+  main_left_qy: -0.701645
+  main_left_qz: 0.054166
+  main_left_w: 0.710369
+
+  main_right_x: 0.19165
+  main_right_y: -0.221378
+  main_right_z: 1.130936
+  main_right_qx: 0.011698
+  main_right_qy: -0.701645
+  main_right_qz: -0.054166
+  main_right_w: 0.710369
+
+  main_gripper_left: 0.0
+  main_gripper_right: 0.0
+
+  # Example: only use right arm.
+  arm_present_mask: [0.0, 1.0]
+
+  cam_top: "__uint8_image_hwc_480x640x3__"
+  cam_right_wrist: "__uint8_image_hwc_1080x1920x3__"
+  cam_left_wrist: "__uint8_image_hwc_1080x1920x3__"
+
+  # These tactile keys follow the current Spark tactile camera naming logic.
+  cam_right_gripper_left_tactile: "__uint8_image_hwc_480x640x3__"
+  cam_right_gripper_right_tactile: "__uint8_image_hwc_480x640x3__"
+  cam_left_gripper_left_tactile: "__uint8_image_hwc_480x640x3__"
+  cam_left_gripper_right_tactile: "__uint8_image_hwc_480x640x3__"
+
+  # Optional explicit tactile masks.
+  observation.tactile_present: [1.0]
+  observation.tactile_slot_present: [1.0, 1.0, 1.0, 1.0]
+
+# Optional explicit masks:
+# - If you already have exact per-dimension masks upstream, you can pass them directly.
+# - The runtime will prefer these explicit masks over inferred ones when available.
+optional_explicit_masks:
+  # 20 dims = left pose/gripper 10 + right pose/gripper 10
+  observation.action_mask:
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  observation.state_mask:
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+# Runtime-generated fields:
+# - observation.state            -> 22 dims
+# - observation.action_mask      -> 20 dims
+# - observation.state_mask       -> 20 dims
+# - observation.tactile_present  -> [0/1]
+# - observation.tactile_slot_present -> 4 dims when tactile exists

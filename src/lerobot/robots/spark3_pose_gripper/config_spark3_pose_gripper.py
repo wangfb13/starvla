@@ -18,8 +18,8 @@ from .schema import (
     Spark3PoseTransformConfig,
     default_end_effectors,
     default_joint_name_mapping,
-    default_left_flange_to_tcp_transform,
-    default_right_flange_to_tcp_transform,
+    default_left_flange_to_tcp_transform_v2,
+    default_right_flange_to_tcp_transform_v2,
 )
 
 
@@ -38,15 +38,13 @@ class Spark3PoseGripperConfig(RobotConfig):
     joint_name_mapping: dict[str, str] = field(default_factory=default_joint_name_mapping)
     end_effectors: dict[str, Spark3EndEffectorConfig] = field(default_factory=default_end_effectors)
     sensors: dict[str, Spark3ObservationTopicConfig] = field(default_factory=dict)
-    # To switch to the measured TCP v2 preset, replace this factory with the
-    # `_v2` helper defined in `schema.py`.
+    # Default to the measured TCP v2 preset for new Spark pose/gripper configs.
     left_flange_to_tcp_transform: Spark3PoseTransformConfig | None = field(
-        default_factory=default_left_flange_to_tcp_transform
+        default_factory=default_left_flange_to_tcp_transform_v2
     )
-    # To switch to the measured TCP v2 preset, replace this factory with the
-    # `_v2` helper defined in `schema.py`.
+    # Default to the measured TCP v2 preset for new Spark pose/gripper configs.
     right_flange_to_tcp_transform: Spark3PoseTransformConfig | None = field(
-        default_factory=default_right_flange_to_tcp_transform
+        default_factory=default_right_flange_to_tcp_transform_v2
     )
     default_left_arm_pose: list[float] = field(default_factory=lambda: DEFAULT_LEFT_ARM_POSE.copy())
     default_right_arm_pose: list[float] = field(default_factory=lambda: DEFAULT_RIGHT_ARM_POSE.copy())

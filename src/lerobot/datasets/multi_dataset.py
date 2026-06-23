@@ -40,10 +40,11 @@ SPARKY_SINGLE_LEFT_IMAGE = "observation.images.cam_left"
 SPARKY_SINGLE_RIGHT_IMAGE = "observation.images.cam_right"
 SPARKY_DUAL_LEFT_IMAGE = "observation.images.left_cam_left"
 SPARKY_DUAL_RIGHT_IMAGE = "observation.images.right_cam_right"
-SPARKY_LEFT_HAND_LEFT_TACTILE = "observation.depth_deformation.tactile_left_left"
-SPARKY_LEFT_HAND_RIGHT_TACTILE = "observation.depth_deformation.tactile_right_left"
-SPARKY_RIGHT_HAND_LEFT_TACTILE = "observation.depth_deformation.tactile_left_right"
-SPARKY_RIGHT_HAND_RIGHT_TACTILE = "observation.depth_deformation.tactile_right_right"
+
+SPARKY_CANONICAL_LEFT_LEFT_TACTILE = "observation.depth_deformation.tactile_left_left"
+SPARKY_CANONICAL_LEFT_RIGHT_TACTILE = "observation.depth_deformation.tactile_left_right"
+SPARKY_CANONICAL_RIGHT_LEFT_TACTILE = "observation.depth_deformation.tactile_right_left"
+SPARKY_CANONICAL_RIGHT_RIGHT_TACTILE = "observation.depth_deformation.tactile_right_right"
 
 
 def _infer_sparky_visual_aliases(features: dict[str, dict]) -> dict[str, str]:
@@ -55,17 +56,25 @@ def _infer_sparky_visual_aliases(features: dict[str, dict]) -> dict[str, str]:
     if SPARKY_DUAL_RIGHT_IMAGE in features and SPARKY_SINGLE_RIGHT_IMAGE not in features:
         aliases[SPARKY_DUAL_RIGHT_IMAGE] = SPARKY_SINGLE_RIGHT_IMAGE
 
-    is_right_only = (
-        SPARKY_SINGLE_RIGHT_IMAGE in features
-        and SPARKY_SINGLE_LEFT_IMAGE not in features
-        and SPARKY_LEFT_HAND_LEFT_TACTILE in features
-        and SPARKY_LEFT_HAND_RIGHT_TACTILE in features
-        and SPARKY_RIGHT_HAND_LEFT_TACTILE not in features
-        and SPARKY_RIGHT_HAND_RIGHT_TACTILE not in features
-    )
-    if is_right_only:
-        aliases[SPARKY_LEFT_HAND_LEFT_TACTILE] = SPARKY_RIGHT_HAND_LEFT_TACTILE
-        aliases[SPARKY_LEFT_HAND_RIGHT_TACTILE] = SPARKY_RIGHT_HAND_RIGHT_TACTILE
+    has_left_camera = SPARKY_SINGLE_LEFT_IMAGE in features or SPARKY_DUAL_LEFT_IMAGE in features
+    has_right_camera = SPARKY_SINGLE_RIGHT_IMAGE in features or SPARKY_DUAL_RIGHT_IMAGE in features
+
+    has_left_left = SPARKY_CANONICAL_LEFT_LEFT_TACTILE in features
+    has_left_right = SPARKY_CANONICAL_LEFT_RIGHT_TACTILE in features
+    has_right_left = SPARKY_CANONICAL_RIGHT_LEFT_TACTILE in features
+    has_right_right = SPARKY_CANONICAL_RIGHT_RIGHT_TACTILE in features
+
+    # Historical single-arm datasets used:
+    # - left-only:  tactile_left_left + tactile_right_left
+    # - right-only: tactile_left_left + tactile_right_left
+    # The semantic meaning depends on which arm camera exists in the sample.
+    is_historical_single_arm_pair = has_left_left and has_right_left and not has_left_right and not has_right_right
+
+    if is_historical_single_arm_pair and has_left_camera and not has_right_camera:
+        aliases[SPARKY_CANONICAL_RIGHT_LEFT_TACTILE] = SPARKY_CANONICAL_LEFT_RIGHT_TACTILE
+    elif is_historical_single_arm_pair and has_right_camera and not has_left_camera:
+        aliases[SPARKY_CANONICAL_LEFT_LEFT_TACTILE] = SPARKY_CANONICAL_RIGHT_LEFT_TACTILE
+        aliases[SPARKY_CANONICAL_RIGHT_LEFT_TACTILE] = SPARKY_CANONICAL_RIGHT_RIGHT_TACTILE
 
     return aliases
 
@@ -87,28 +96,40 @@ def _apply_item_feature_aliases(item: dict[str, Any], aliases: dict[str, str]) -
     if not aliases:
         return item
 
+    original_item = dict(item)
     item = dict(item)
+    moving_feature_keys = set(aliases)
+    pending_updates: dict[str, Any] = {}
+    pending_removals: set[str] = set()
     for source_key, target_key in aliases.items():
-        if source_key in item and target_key not in item:
-            item[target_key] = item[source_key]
+        if source_key in original_item and (target_key not in original_item or target_key in moving_feature_keys):
+            pending_updates[target_key] = original_item[source_key]
         if source_key != target_key:
             # Treat aliases as renames so right-hand single-arm tactile data does not
             # also look like valid left-hand tactile data after canonicalization.
-            item.pop(source_key, None)
+            pending_removals.add(source_key)
 
         source_pad_key = f"{source_key}_is_pad"
         target_pad_key = f"{target_key}_is_pad"
-        if source_pad_key in item and target_pad_key not in item:
-            item[target_pad_key] = item[source_pad_key]
+        if source_pad_key in original_item and (
+            target_pad_key not in original_item or target_key in moving_feature_keys
+        ):
+            pending_updates[target_pad_key] = original_item[source_pad_key]
         if source_pad_key != target_pad_key:
-            item.pop(source_pad_key, None)
+            pending_removals.add(source_pad_key)
 
         source_missing_key = f"{source_key}_is_missing"
         target_missing_key = f"{target_key}_is_missing"
-        if source_missing_key in item and target_missing_key not in item:
-            item[target_missing_key] = item[source_missing_key]
+        if source_missing_key in original_item and (
+            target_missing_key not in original_item or target_key in moving_feature_keys
+        ):
+            pending_updates[target_missing_key] = original_item[source_missing_key]
         if source_missing_key != target_missing_key:
-            item.pop(source_missing_key, None)
+            pending_removals.add(source_missing_key)
+
+    for key in pending_removals:
+        item.pop(key, None)
+    item.update(pending_updates)
 
     return item
 
@@ -443,6 +464,8 @@ class MultiLeRobotDatasetMetadata:
                 "subtask_text_sidecar",
                 "next_subtask_text_sidecar",
                 "dataset_index",
+                "action_valid_mask",
+                "state_mask",
                 OBS_ACTION_MASK,
                 OBS_STATE_MASK,
             }:
@@ -453,6 +476,16 @@ class MultiLeRobotDatasetMetadata:
         for key, default_value in self.extra_complementary_defaults.items():
             if key not in canonical:
                 canonical[key] = default_value.clone() if torch.is_tensor(default_value) else default_value
+
+        if "action_valid_mask" in canonical:
+            canonical[OBS_ACTION_MASK] = canonical["action_valid_mask"]
+        elif OBS_ACTION_MASK in canonical:
+            canonical["action_valid_mask"] = canonical[OBS_ACTION_MASK]
+
+        if "state_mask" in canonical:
+            canonical[OBS_STATE_MASK] = canonical["state_mask"]
+        elif OBS_STATE_MASK in canonical:
+            canonical["state_mask"] = canonical[OBS_STATE_MASK]
 
         # Keep language-side complementary keys structurally stable so the default
         # DataLoader collate_fn does not fail when some frames lack subtask annotations.
@@ -625,10 +658,15 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
     def _resolve_extra_complementary_defaults(self) -> dict[str, object]:
         defaults: dict[str, object] = {}
+        mask_keys = {"action_valid_mask", "state_mask", OBS_ACTION_MASK, OBS_STATE_MASK}
         for dataset in self._datasets:
             for key, value in dataset.sidecar_default_values.items():
+                if key in mask_keys:
+                    continue
                 defaults.setdefault(key, value)
             for key in dataset.sidecar_default_values:
+                if key in mask_keys:
+                    continue
                 vector_dim = dataset.sidecar_vector_dim(key)
                 if vector_dim is None:
                     continue

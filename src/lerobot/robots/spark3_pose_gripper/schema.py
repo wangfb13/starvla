@@ -536,8 +536,12 @@ def camera_feature_dict(camera_configs: dict[str, Any]) -> dict[str, tuple[int, 
     for camera_name, config in camera_configs.items():
         if "tactile" in camera_name:
             tactile_base_name = camera_name[:-8] if camera_name.endswith("_tactile") else camera_name
-            features[f"{tactile_base_name}_left_tactile"] = (config.height, config.width, 3)
-            features[f"{tactile_base_name}_right_tactile"] = (config.height, config.width, 3)
+            if getattr(config, "inference_mode", False):
+                features[f"{tactile_base_name}_left_tactile_depth_deformation"] = (config.height, config.width, 3)
+                features[f"{tactile_base_name}_right_tactile_depth_deformation"] = (config.height, config.width, 3)
+            else:
+                features[f"{tactile_base_name}_left_tactile"] = (config.height, config.width, 3)
+                features[f"{tactile_base_name}_right_tactile"] = (config.height, config.width, 3)
             continue
 
         features[camera_name] = (config.height, config.width, 3)
@@ -555,6 +559,10 @@ def split_camera_observation(camera_name: str, frame: Any) -> dict[str, Any]:
             obs[f"{camera_name}_depth"] = expand_depth_frame(frame["depth"])
 
         tactile_base_name = camera_name[:-8] if camera_name.endswith("_tactile") else camera_name
+        if "left_tactile_depth_deformation" in frame:
+            obs[f"{tactile_base_name}_left_tactile_depth_deformation"] = frame["left_tactile_depth_deformation"]
+        if "right_tactile_depth_deformation" in frame:
+            obs[f"{tactile_base_name}_right_tactile_depth_deformation"] = frame["right_tactile_depth_deformation"]
         if "left_tactile" in frame:
             obs[f"{tactile_base_name}_left_tactile"] = frame["left_tactile"]
         if "right_tactile" in frame:

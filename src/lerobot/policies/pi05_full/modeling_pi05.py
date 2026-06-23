@@ -63,6 +63,7 @@ from lerobot.utils.constants import (
     OBS_LANGUAGE_TOKENS,
     OBS_LANGUAGE_USER_PROMPT_ATTENTION_MASK,
     OBS_LANGUAGE_USER_PROMPT_TOKENS,
+    OBS_STATE,
     OPENPI_ATTENTION_MASK_VALUE,
 )
 
@@ -317,6 +318,46 @@ def resize_without_pad_torch(
         resized_images = resized_images.permute(0, 2, 3, 1)
 
     return resized_images
+
+
+TACTILE_ROLE_ALIAS_ORDER = (
+    "observation.images.tactile_left_left",
+    "observation.images.tactile_left_right",
+    "observation.images.tactile_right_left",
+    "observation.images.tactile_right_right",
+    "observation.depth_deformation.tactile_left_left",
+    "observation.depth_deformation.tactile_left_right",
+    "observation.depth_deformation.tactile_right_left",
+    "observation.depth_deformation.tactile_right_right",
+    "observation.depth_shear.tactile_left_left",
+    "observation.depth_shear.tactile_left_right",
+    "observation.depth_shear.tactile_right_left",
+    "observation.depth_shear.tactile_right_right",
+)
+TACTILE_SENSOR_SLOT_ID_BY_KEY = {key: idx % 4 for idx, key in enumerate(TACTILE_ROLE_ALIAS_ORDER)}
+TACTILE_HAND_SIDE_ID_BY_KEY = {key: 0 if (idx % 4) < 2 else 1 for idx, key in enumerate(TACTILE_ROLE_ALIAS_ORDER)}
+TACTILE_FINGER_SLOT_ID_BY_KEY = {key: (idx % 4) % 2 for idx, key in enumerate(TACTILE_ROLE_ALIAS_ORDER)}
+
+
+class TactilePatchEncoderBlock(nn.Module):
+    def __init__(self, dim: int, num_heads: int):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Linear(dim * 4, dim),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        residual = x
+        x_norm = self.norm1(x)
+        x_attn, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
+        x = residual + x_attn
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
 # Define the complete layer computation function for gradient checkpointing
@@ -681,6 +722,64 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        self.enable_tactile = config.enable_tactile
+        self.tactile_encoder_type = config.tactile_encoder_type
+        if self.enable_tactile:
+            self.tactile_in_proj = nn.Linear(config.max_tactile_dim, paligemma_config.width)
+            self.tactile_fusion_layernorm = nn.LayerNorm(paligemma_config.width)
+            self.tactile_gate = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
+            self.tactile_modality_embedding = nn.Embedding(1, paligemma_config.width)
+            self.tactile_hand_side_embedding = nn.Embedding(2, paligemma_config.width)
+            self.tactile_finger_slot_embedding = nn.Embedding(2, paligemma_config.width)
+            self.tactile_sensor_slot_embedding = nn.Embedding(4, paligemma_config.width)
+            nn.init.zeros_(self.tactile_modality_embedding.weight)
+            nn.init.zeros_(self.tactile_hand_side_embedding.weight)
+            nn.init.zeros_(self.tactile_finger_slot_embedding.weight)
+            nn.init.zeros_(self.tactile_sensor_slot_embedding.weight)
+
+            if self.tactile_encoder_type == "parsed_vit":
+                tactile_h, tactile_w = config.tactile_target_size
+                patch_size = config.tactile_patch_size
+                if tactile_h % patch_size != 0 or tactile_w % patch_size != 0:
+                    raise ValueError(
+                        f"tactile_target_size {config.tactile_target_size} must be divisible by "
+                        f"tactile_patch_size {patch_size}"
+                    )
+                tactile_patch_count = (tactile_h // patch_size) * (tactile_w // patch_size)
+                self.tactile_patch_proj = nn.Conv2d(
+                    config.tactile_input_channels,
+                    config.tactile_patch_encoder_dim,
+                    kernel_size=patch_size,
+                    stride=patch_size,
+                )
+                self.tactile_patch_pos_embed = nn.Embedding(tactile_patch_count, config.tactile_patch_encoder_dim)
+                self.tactile_patch_blocks = nn.ModuleList(
+                    [
+                        TactilePatchEncoderBlock(
+                            config.tactile_patch_encoder_dim,
+                            config.tactile_resampler_heads,
+                        )
+                        for _ in range(config.tactile_patch_encoder_depth)
+                    ]
+                )
+                self.tactile_patch_layernorm = nn.LayerNorm(config.tactile_patch_encoder_dim)
+                self.tactile_query_tokens = nn.Parameter(
+                    torch.randn(1, config.tactile_token_budget_per_sensor, config.tactile_patch_encoder_dim) * 0.02
+                )
+                self.tactile_resampler_attn = nn.MultiheadAttention(
+                    config.tactile_patch_encoder_dim,
+                    config.tactile_resampler_heads,
+                    batch_first=True,
+                )
+                self.tactile_resampler_ff = nn.Sequential(
+                    nn.Linear(config.tactile_patch_encoder_dim, config.tactile_patch_encoder_dim * 4),
+                    nn.GELU(),
+                    nn.Linear(config.tactile_patch_encoder_dim * 4, config.tactile_patch_encoder_dim),
+                )
+                self.tactile_token_layernorm = nn.LayerNorm(config.tactile_patch_encoder_dim)
+                self.tactile_in_proj = nn.Linear(config.tactile_patch_encoder_dim, paligemma_config.width)
+                self.tactile_sensor_scale = nn.Embedding(4, 1)
+                nn.init.ones_(self.tactile_sensor_scale.weight)
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -708,6 +807,27 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
         logging.info("Disabled gradient checkpointing for PI05Pytorch model")
 
+    @staticmethod
+    def _reset_module_parameters(module: nn.Module) -> None:
+        reset_parameters = getattr(module, "reset_parameters", None)
+        if callable(reset_parameters):
+            reset_parameters()
+
+    def reset_action_expert_parameters(self) -> None:
+        """Reinitialize action-specific modules after loading a warm-start checkpoint."""
+        self.paligemma_with_expert.gemma_expert.apply(self._reset_module_parameters)
+        for module in (
+            self.action_in_proj,
+            self.action_out_proj,
+            self.time_mlp_in,
+            self.time_mlp_out,
+        ):
+            self._reset_module_parameters(module)
+        logging.info(
+            "Reinitialized PI05Full action expert modules: gemma_expert, action_in_proj, "
+            "action_out_proj, time_mlp_in, time_mlp_out"
+        )
+
     def _rtc_enabled(self):
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
@@ -719,10 +839,14 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             )
         return func(*args, **kwargs)
 
-    def _prepare_attention_masks_4d(self, att_2d_masks):
+    def _prepare_attention_masks_4d(self, att_2d_masks, dtype: torch.dtype | None = None):
         """Helper method to prepare 4D attention masks for transformer."""
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
-        return torch.where(att_2d_masks_4d, 0.0, OPENPI_ATTENTION_MASK_VALUE)
+        if dtype is None:
+            dtype = torch.float32
+        zero = torch.tensor(0.0, dtype=dtype, device=att_2d_masks.device)
+        neg = torch.tensor(OPENPI_ATTENTION_MASK_VALUE, dtype=dtype, device=att_2d_masks.device)
+        return torch.where(att_2d_masks_4d, zero, neg)
 
     def sample_noise(self, shape, device):
         return torch.normal(
@@ -748,6 +872,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         masks,
         subtask_tokens: torch.Tensor | None = None,
         subtask_masks: torch.Tensor | None = None,
+        tactile_tokens: Tensor | None = None,
+        tactile_token_masks: Tensor | None = None,
+        tactile_role_metadata: dict[str, Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images, language, and optional subtask tokens for prefix processing."""
         embs = []
@@ -765,6 +892,43 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             embs.append(img_emb)
             image_pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
 
+        if self.enable_tactile and tactile_tokens is not None:
+            bsize = tactile_tokens.shape[0]
+            if tactile_token_masks is None:
+                tactile_token_masks = torch.ones(
+                    bsize,
+                    tactile_tokens.shape[1],
+                    dtype=torch.bool,
+                    device=tactile_tokens.device,
+                )
+            else:
+                tactile_token_masks = tactile_token_masks.to(device=tactile_tokens.device, dtype=torch.bool)
+
+            if self.training and self.config.tactile_dropout_prob > 0:
+                keep = torch.rand(bsize, device=tactile_tokens.device) >= self.config.tactile_dropout_prob
+                tactile_token_masks = tactile_token_masks & keep[:, None]
+
+            def tactile_embed_func(x):
+                out = self.tactile_in_proj(x)
+                out = self.tactile_fusion_layernorm(out)
+                if self.config.enable_tactile_role_embeddings and tactile_role_metadata is not None:
+                    role_emb = self.tactile_modality_embedding(tactile_role_metadata["modality_ids"])
+                    role_emb = role_emb + self.tactile_hand_side_embedding(tactile_role_metadata["hand_side_ids"])
+                    role_emb = role_emb + self.tactile_finger_slot_embedding(
+                        tactile_role_metadata["finger_slot_ids"]
+                    )
+                    role_emb = role_emb + self.tactile_sensor_slot_embedding(
+                        tactile_role_metadata["sensor_slot_ids"]
+                    )
+                    role_mask = tactile_role_metadata["token_active_mask"].to(device=out.device, dtype=out.dtype)
+                    out = (out + role_emb) * role_mask[:, :, None]
+                return out
+
+            tactile_emb = self._apply_checkpoint(tactile_embed_func, tactile_tokens)
+            tactile_emb = tactile_emb * torch.sigmoid(self.tactile_gate)
+            embs.append(tactile_emb)
+            image_pad_masks.append(tactile_token_masks)
+
         # Process language tokens
         def lang_embed_func(tokens):
             lang_emb = self.paligemma_with_expert.embed_language_tokens(tokens)
@@ -775,7 +939,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         embs.append(lang_emb)
 
         subtask_pad_mask = None
-        if subtask_tokens is not None and subtask_masks is not None:
+        if self.config.enable_subtask_branch and subtask_tokens is not None and subtask_masks is not None:
             def subtask_embed_func(subtask_tokens):
                 subtask_emb = self.paligemma_with_expert.embed_language_tokens(subtask_tokens)
                 subtask_emb_dim = subtask_emb.shape[-1]
@@ -853,6 +1017,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         time=None,
         subtask_tokens: torch.Tensor | None = None,
         subtask_masks: torch.Tensor | None = None,
+        tactile_tokens: Tensor | None = None,
+        tactile_token_masks: Tensor | None = None,
+        tactile_role_metadata: dict[str, Tensor] | None = None,
     ) -> dict[str, Tensor]:
         """Do a full training forward pass and compute flow and optional subtask CE losses."""
         if action_mask is not None:
@@ -880,6 +1047,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             masks,
             subtask_tokens=subtask_tokens,
             subtask_masks=subtask_masks,
+            tactile_tokens=tactile_tokens,
+            tactile_token_masks=tactile_token_masks,
+            tactile_role_metadata=tactile_role_metadata,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
 
@@ -932,7 +1102,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             flow_losses = flow_losses * action_mask
 
         subtask_ce_loss = torch.zeros(actions.shape[0], device=actions.device, dtype=torch.float32)
-        if subtask_tokens is not None and subtask_masks is not None:
+        use_subtask_branch = self.config.enable_subtask_branch and subtask_tokens is not None and subtask_masks is not None
+        if use_subtask_branch:
             lm_head = self.paligemma_with_expert.paligemma.lm_head
             language_len = tokens.shape[1]
             subtask_len = subtask_tokens.shape[1]
@@ -964,6 +1135,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         masks,
         subtask_tokens: torch.Tensor | None = None,
         subtask_masks: torch.Tensor | None = None,
+        tactile_tokens: Tensor | None = None,
+        tactile_token_masks: Tensor | None = None,
+        tactile_role_metadata: dict[str, Tensor] | None = None,
         action_mask=None,
         noise=None,
         num_steps=None,
@@ -998,6 +1172,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             masks,
             subtask_tokens=subtask_tokens,
             subtask_masks=subtask_masks,
+            tactile_tokens=tactile_tokens,
+            tactile_token_masks=tactile_token_masks,
+            tactile_role_metadata=tactile_role_metadata,
         )
         prefix_att_2d_masks = prefix_att_masks
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
@@ -1062,6 +1239,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         img_masks,
         tokens,
         masks,
+        tactile_tokens: Tensor | None = None,
+        tactile_token_masks: Tensor | None = None,
+        tactile_role_metadata: dict[str, Tensor] | None = None,
         max_decoding_steps: int | None = None,
         temperature: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1095,6 +1275,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             masks_in,
             subtask_tokens=None,
             subtask_masks=None,
+            tactile_tokens=tactile_tokens,
+            tactile_token_masks=tactile_token_masks,
+            tactile_role_metadata=tactile_role_metadata,
         )
 
         if (
@@ -1104,7 +1287,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
         position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-        att_4d = self._prepare_attention_masks_4d(prefix_att_masks)
+        att_4d = self._prepare_attention_masks_4d(prefix_att_masks, dtype=prefix_embs.dtype)
 
         (prefix_out, _), past_key_values = self.paligemma_with_expert.forward(
             attention_mask=att_4d,
@@ -1139,7 +1322,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             new_column = torch.ones((bsize, 1), dtype=torch.bool, device=device)
             current_pad_mask = torch.cat([current_pad_mask, new_column], dim=1)
             current_position_ids = (torch.sum(current_pad_mask, dim=1, keepdim=True) - 1).long()
-            step_att_mask = self._prepare_attention_masks_4d(current_pad_mask.unsqueeze(1))
+            step_att_mask = self._prepare_attention_masks_4d(
+                current_pad_mask.unsqueeze(1), dtype=next_token_emb.dtype
+            )
 
             (step_out, _), past_key_values = self.paligemma_with_expert.forward(
                 attention_mask=step_att_mask,
@@ -1343,7 +1528,9 @@ class PI05FullPolicy(PreTrainedPolicy):
                     print(f"  ... and {len(shape_mismatched_keys) - 10} more")
 
             # Load the remapped state dict into the model
-            load_strict = strict and not shape_mismatched_keys
+            # Tactile-enabled models commonly warm-start from RGB-only checkpoints, so
+            # tactile branch parameters are expected to be missing on first load.
+            load_strict = strict and not shape_mismatched_keys and not getattr(model.config, "enable_tactile", False)
             missing_keys, unexpected_keys = model.load_state_dict(compatible_state_dict, strict=load_strict)
             skipped_key_names = {key for key, _, _ in shape_mismatched_keys}
 
@@ -1374,6 +1561,9 @@ class PI05FullPolicy(PreTrainedPolicy):
 
         except Exception as e:
             print(f"Warning: Could not load state dict: {e}")
+
+        if getattr(model.config, "reset_action_expert_after_pretrained_load", False):
+            model.model.reset_action_expert_parameters()
 
         return model
 
@@ -1448,6 +1638,8 @@ class PI05FullPolicy(PreTrainedPolicy):
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
+        if hasattr(self, "_lerobot_processed_action_queue"):
+            self._lerobot_processed_action_queue = deque(maxlen=self.config.n_action_steps)
         self._cached_subtask_tokens: Tensor | None = None
         self._cached_subtask_masks: Tensor | None = None
         self._cached_subtask_prompt_tokens: Tensor | None = None
@@ -1470,6 +1662,23 @@ class PI05FullPolicy(PreTrainedPolicy):
     def _rtc_enabled(self) -> bool:
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
+    def _infer_batch_size(self, batch: dict[str, Tensor]) -> int:
+        for value in batch.values():
+            if torch.is_tensor(value) and value.ndim > 0:
+                return int(value.shape[0])
+        raise ValueError("Could not infer batch size from the batch.")
+
+    def _resolve_tactile_keys(self, batch: dict[str, Tensor]) -> list[str]:
+        if not self.config.enable_tactile:
+            return []
+        if self.config.tactile_feature_keys:
+            return [key for key in self.config.tactile_feature_keys if key in batch]
+        return [key for key in self.config.image_features if "tactile" in key and key in batch]
+
+    def _resolve_rgb_image_keys(self, batch: dict[str, Tensor]) -> list[str]:
+        tactile_keys = set(self._resolve_tactile_keys(batch))
+        return [key for key in self.config.image_features if key in batch and key not in tactile_keys]
+
     def _preprocess_images(self, batch: dict[str, Tensor]) -> tuple[list[Tensor], list[Tensor]]:
         """Preprocess images for the model.
 
@@ -1482,13 +1691,15 @@ class PI05FullPolicy(PreTrainedPolicy):
         # Get device from model parameters
         device = next(self.parameters()).device
 
-        present_img_keys = [key for key in self.config.image_features if key in batch]
-        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        tactile_keys = set(self._resolve_tactile_keys(batch))
+        rgb_image_features = [key for key in self.config.image_features if key not in tactile_keys]
+        present_img_keys = [key for key in rgb_image_features if key in batch]
+        missing_img_keys = [key for key in rgb_image_features if key not in batch]
 
         if len(present_img_keys) == 0:
             raise ValueError(
                 f"All image features are missing from the batch. At least one expected. "
-                f"(batch: {batch.keys()}) (image_features: {self.config.image_features})"
+                f"(batch: {batch.keys()}) (rgb_image_features: {rgb_image_features})"
             )
 
         # Preprocess image features present in the batch
@@ -1539,6 +1750,182 @@ class PI05FullPolicy(PreTrainedPolicy):
 
         return images, img_masks
 
+    def _build_tactile_role_metadata(
+        self,
+        *,
+        batch: dict[str, Tensor],
+        tactile_keys: list[str],
+        tactile_segments: list[tuple[str, int, int]],
+        present: Tensor,
+        batch_size: int,
+        device: torch.device,
+    ) -> dict[str, Tensor] | None:
+        if not self.config.enable_tactile_role_embeddings or not tactile_segments:
+            return None
+        if any(key not in TACTILE_SENSOR_SLOT_ID_BY_KEY for key in tactile_keys):
+            return None
+
+        slot_present = batch.get(self.config.tactile_slot_present_key)
+        if torch.is_tensor(slot_present):
+            slot_present = slot_present.to(device=device, dtype=torch.bool)
+            if slot_present.ndim == 1:
+                slot_present = slot_present[None, :]
+            else:
+                slot_present = slot_present.reshape(slot_present.shape[0], -1)
+        else:
+            slot_present = None
+
+        num_tokens = max(end for _, _, end in tactile_segments)
+        modality_ids = torch.zeros((batch_size, num_tokens), dtype=torch.long, device=device)
+        hand_side_ids = torch.zeros((batch_size, num_tokens), dtype=torch.long, device=device)
+        finger_slot_ids = torch.zeros((batch_size, num_tokens), dtype=torch.long, device=device)
+        sensor_slot_ids = torch.zeros((batch_size, num_tokens), dtype=torch.long, device=device)
+        token_active_mask = torch.zeros((batch_size, num_tokens), dtype=torch.bool, device=device)
+
+        for key, start, end in tactile_segments:
+            sensor_slot_id = TACTILE_SENSOR_SLOT_ID_BY_KEY[key]
+            hand_side_ids[:, start:end] = TACTILE_HAND_SIDE_ID_BY_KEY[key]
+            finger_slot_ids[:, start:end] = TACTILE_FINGER_SLOT_ID_BY_KEY[key]
+            sensor_slot_ids[:, start:end] = sensor_slot_id
+            if slot_present is not None and sensor_slot_id < slot_present.shape[1]:
+                token_active_mask[:, start:end] = slot_present[:, sensor_slot_id : sensor_slot_id + 1]
+            else:
+                token_active_mask[:, start:end] = present[:, None]
+
+        return {
+            "modality_ids": modality_ids,
+            "hand_side_ids": hand_side_ids,
+            "finger_slot_ids": finger_slot_ids,
+            "sensor_slot_ids": sensor_slot_ids,
+            "token_active_mask": token_active_mask,
+        }
+
+    def _encode_parsed_tactile_sensor(self, tensor: Tensor, sensor_slot_id: int | None = None) -> Tensor:
+        if tensor.ndim != 4:
+            raise ValueError(f"Parsed tactile tensor must be rank-4 [B,C,H,W], got {tuple(tensor.shape)}")
+        target_h, target_w = self.config.tactile_target_size
+        if tuple(tensor.shape[-2:]) != (target_h, target_w):
+            tensor = F.interpolate(tensor, size=(target_h, target_w), mode="bilinear", align_corners=False)
+        patches = self.model.tactile_patch_proj(tensor)
+        patches = patches.flatten(2).transpose(1, 2)
+        pos_ids = torch.arange(patches.shape[1], device=patches.device)
+        patches = patches + self.model.tactile_patch_pos_embed(pos_ids)[None, :, :]
+        for block in self.model.tactile_patch_blocks:
+            patches = block(patches)
+        patches = self.model.tactile_patch_layernorm(patches)
+        query = self.model.tactile_query_tokens.expand(patches.shape[0], -1, -1)
+        resampled, _ = self.model.tactile_resampler_attn(query, patches, patches, need_weights=False)
+        resampled = resampled + self.model.tactile_resampler_ff(self.model.tactile_token_layernorm(resampled))
+        if sensor_slot_id is not None:
+            scale = self.model.tactile_sensor_scale.weight[sensor_slot_id].view(1, 1, 1)
+            resampled = resampled * scale
+        return resampled
+
+    def _prepare_tactile(
+        self, batch: dict[str, Tensor]
+    ) -> tuple[Tensor | None, Tensor | None, dict[str, Tensor] | None]:
+        if not self.config.enable_tactile:
+            return None, None, None
+
+        tactile_keys = self._resolve_tactile_keys(batch)
+        if not tactile_keys and not self.config.tactile_fallback_to_state:
+            return None, None, None
+
+        device = next(self.parameters()).device
+        batch_size = self._infer_batch_size(batch)
+        tactile_segments: list[tuple[str, int, int]] = []
+        cursor = 0
+
+        if self.config.tactile_encoder_type == "parsed_vit" and tactile_keys:
+            parsed_tokens_per_sensor: list[Tensor] = []
+            for key in tactile_keys:
+                tensor = batch[key].to(device=device, dtype=torch.float32)
+                if tensor.ndim == 5:
+                    tensor = tensor[:, -1]
+                if tensor.ndim == 4 and tensor.shape[-1] in {1, 3} and tensor.shape[1] not in {1, 3}:
+                    tensor = tensor.permute(0, 3, 1, 2)
+                if tensor.ndim != 4:
+                    raise ValueError(f"Parsed tactile feature {key} must be rank-4, got {tuple(tensor.shape)}")
+                if tensor.shape[1] != self.config.tactile_input_channels:
+                    raise ValueError(
+                        f"Parsed tactile feature {key} must have {self.config.tactile_input_channels} channels, "
+                        f"got {tensor.shape[1]}"
+                    )
+                sensor_slot_id = TACTILE_SENSOR_SLOT_ID_BY_KEY.get(key)
+                encoded = self._encode_parsed_tactile_sensor(tensor, sensor_slot_id=sensor_slot_id)
+                parsed_tokens_per_sensor.append(encoded)
+                tactile_segments.append((key, cursor, cursor + encoded.shape[1]))
+                cursor += encoded.shape[1]
+
+            tactile_tokens = torch.cat(parsed_tokens_per_sensor, dim=1)
+        else:
+            tactile_vectors: list[Tensor] = []
+            num_tactile_keys = max(1, len(tactile_keys))
+            target_dim = self.config.tactile_tokens * self.config.max_tactile_dim
+            per_key_budget = max(1, target_dim // num_tactile_keys)
+
+            for key in tactile_keys:
+                tensor = batch[key].to(device=device, dtype=torch.float32)
+                if tensor.ndim == 5:
+                    tensor = tensor[:, -1]
+                if tensor.ndim == 4 and tensor.shape[-1] in {1, 3} and tensor.shape[1] not in {1, 3}:
+                    tensor = tensor.permute(0, 3, 1, 2)
+                if tensor.ndim == 4 and tensor.shape[1] in {1, 3}:
+                    channels = int(tensor.shape[1])
+                    max_side = int(max(1, math.floor(math.sqrt(per_key_budget / max(1, channels)))))
+                    pool_side = max(1, min(16, max_side))
+                    tensor = F.adaptive_avg_pool2d(tensor, output_size=(pool_side, pool_side))
+                flattened = tensor.reshape(tensor.shape[0], -1)
+                tactile_vectors.append(flattened)
+                token_start = cursor // self.config.max_tactile_dim
+                cursor += flattened.shape[1]
+                token_end = min(self.config.tactile_tokens, math.ceil(cursor / self.config.max_tactile_dim))
+                if token_end > token_start:
+                    tactile_segments.append((key, token_start, token_end))
+
+            if not tactile_vectors and self.config.tactile_fallback_to_state and OBS_STATE in batch:
+                state = batch[OBS_STATE].to(device=device, dtype=torch.float32)
+                tactile_vectors.append(state.reshape(state.shape[0], -1))
+
+            if not tactile_vectors:
+                return None, None, None
+
+            tactile_vector = torch.cat(tactile_vectors, dim=1)
+            tactile_vector = pad_vector(tactile_vector, self.config.tactile_tokens * self.config.max_tactile_dim)
+            tactile_vector = tactile_vector[:, : self.config.tactile_tokens * self.config.max_tactile_dim]
+            tactile_tokens = tactile_vector.view(
+                tactile_vector.shape[0],
+                self.config.tactile_tokens,
+                self.config.max_tactile_dim,
+            )
+
+        present = batch.get(self.config.tactile_mask_key)
+        if torch.is_tensor(present):
+            present = present.to(device=device, dtype=torch.bool)
+            if present.ndim > 1:
+                present = present.reshape(present.shape[0], -1).any(dim=1)
+        else:
+            present = torch.ones(batch_size, dtype=torch.bool, device=device)
+
+        tactile_role_metadata = self._build_tactile_role_metadata(
+            batch=batch,
+            tactile_keys=tactile_keys,
+            tactile_segments=tactile_segments,
+            present=present,
+            batch_size=batch_size,
+            device=device,
+        )
+        tactile_token_masks = torch.ones(
+            tactile_tokens.shape[:2],
+            dtype=torch.bool,
+            device=device,
+        )
+        if tactile_role_metadata is not None:
+            tactile_token_masks = tactile_token_masks & tactile_role_metadata["token_active_mask"]
+        else:
+            tactile_token_masks = tactile_token_masks & present[:, None]
+        return tactile_tokens, tactile_token_masks, tactile_role_metadata
+
     def prepare_action(self, batch):
         """Pad action"""
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
@@ -1546,9 +1933,28 @@ class PI05FullPolicy(PreTrainedPolicy):
 
     def prepare_action_mask(self, batch):
         action_mask = batch.get(self.config.action_mask_observation_key, batch.get(OBS_ACTION_MASK))
+        sidecar_action_mask = batch.get("action_valid_mask")
+        if action_mask is None:
+            action_mask = sidecar_action_mask
+        elif sidecar_action_mask is not None and torch.is_tensor(action_mask) and torch.is_tensor(sidecar_action_mask):
+            if action_mask.sum() <= 0 and sidecar_action_mask.sum() > 0:
+                action_mask = sidecar_action_mask
         if action_mask is None:
             return None
         return pad_vector(action_mask, self.config.max_action_dim)
+
+    @staticmethod
+    def _debug_tensor_summary(batch: dict[str, Tensor], key: str) -> str:
+        value = batch.get(key)
+        if value is None:
+            return f"{key}=None"
+        if not torch.is_tensor(value):
+            return f"{key}=type({type(value).__name__})"
+        return (
+            f"{key}:shape={tuple(value.shape)} "
+            f"sum={float(value.float().sum().detach().cpu()):.3f} "
+            f"mean={float(value.float().mean().detach().cpu()):.3f}"
+        )
 
     @staticmethod
     def get_language_inputs(batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
@@ -1620,6 +2026,9 @@ class PI05FullPolicy(PreTrainedPolicy):
         batch_size: int,
         device: torch.device,
     ) -> tuple[Tensor | None, Tensor | None, Tensor]:
+        if not self.config.enable_subtask_branch:
+            fallback_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            return None, None, fallback_mask
         subtask_tokens, subtask_masks = self.get_subtask_inputs(batch)
         if (subtask_tokens is None) != (subtask_masks is None):
             raise ValueError("subtask tokens and attention masks must either both be present or both be absent.")
@@ -1662,7 +2071,12 @@ class PI05FullPolicy(PreTrainedPolicy):
         img_masks: list[Tensor],
         tokens: Tensor,
         masks: Tensor,
+        tactile_tokens: Tensor | None = None,
+        tactile_token_masks: Tensor | None = None,
+        tactile_role_metadata: dict[str, Tensor] | None = None,
     ) -> tuple[Tensor, Tensor]:
+        if not self.config.enable_subtask_branch:
+            raise RuntimeError("Subtask branch is disabled in pi05_full config; generation should not be called.")
         current_time = time.time()
         if self._should_regenerate_subtasks(tokens, masks, current_time):
             self._ensure_paligemma_tokenizer()
@@ -1671,6 +2085,9 @@ class PI05FullPolicy(PreTrainedPolicy):
                 img_masks,
                 tokens,
                 masks,
+                tactile_tokens=tactile_tokens,
+                tactile_token_masks=tactile_token_masks,
+                tactile_role_metadata=tactile_role_metadata,
                 max_decoding_steps=self.config.max_decoding_steps,
                 temperature=self.config.temperature,
             )
@@ -1694,7 +2111,12 @@ class PI05FullPolicy(PreTrainedPolicy):
         img_masks: list[Tensor],
         tokens: Tensor,
         masks: Tensor,
+        tactile_tokens: Tensor | None = None,
+        tactile_token_masks: Tensor | None = None,
+        tactile_role_metadata: dict[str, Tensor] | None = None,
     ) -> tuple[Tensor | None, Tensor | None]:
+        if not self.config.enable_subtask_branch:
+            return None, None
         batch_size = tokens.shape[0]
         explicit_tokens, explicit_masks, fallback_mask = self._resolve_subtask_inputs(
             batch,
@@ -1706,7 +2128,15 @@ class PI05FullPolicy(PreTrainedPolicy):
             self._invalidate_subtask_cache()
             return explicit_tokens, explicit_masks
 
-        generated_tokens, generated_masks = self._get_or_generate_subtasks(images, img_masks, tokens, masks)
+        generated_tokens, generated_masks = self._get_or_generate_subtasks(
+            images,
+            img_masks,
+            tokens,
+            masks,
+            tactile_tokens=tactile_tokens,
+            tactile_token_masks=tactile_token_masks,
+            tactile_role_metadata=tactile_role_metadata,
+        )
         if explicit_tokens is None or explicit_masks is None:
             return generated_tokens, generated_masks
 
@@ -1745,9 +2175,22 @@ class PI05FullPolicy(PreTrainedPolicy):
 
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
+        tactile_tokens, tactile_token_masks, tactile_role_metadata = self._prepare_tactile(batch)
         tokens, masks = self.get_language_inputs(batch)
         action_mask = self.prepare_action_mask(batch)
-        subtask_tokens, subtask_masks = self._select_inference_subtasks(batch, images, img_masks, tokens, masks)
+        subtask_tokens = None
+        subtask_masks = None
+        if self.config.enable_subtask_branch:
+            subtask_tokens, subtask_masks = self._select_inference_subtasks(
+                batch,
+                images,
+                img_masks,
+                tokens,
+                masks,
+                tactile_tokens=tactile_tokens,
+                tactile_token_masks=tactile_token_masks,
+                tactile_role_metadata=tactile_role_metadata,
+            )
 
         # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
         actions = self.model.sample_actions(
@@ -1757,6 +2200,9 @@ class PI05FullPolicy(PreTrainedPolicy):
             masks,
             subtask_tokens=subtask_tokens,
             subtask_masks=subtask_masks,
+            tactile_tokens=tactile_tokens,
+            tactile_token_masks=tactile_token_masks,
+            tactile_role_metadata=tactile_role_metadata,
             action_mask=action_mask,
             **kwargs,
         )
@@ -1783,11 +2229,25 @@ class PI05FullPolicy(PreTrainedPolicy):
         """
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
+        tactile_tokens, tactile_token_masks, tactile_role_metadata = self._prepare_tactile(batch)
         tokens, masks = self.get_language_inputs(batch)
-        subtask_tokens, subtask_masks = self.get_subtask_inputs(batch)
+        subtask_tokens, subtask_masks = self.get_subtask_inputs(batch) if self.config.enable_subtask_branch else (None, None)
 
         actions = self.prepare_action(batch)
         action_mask = self.prepare_action_mask(batch)
+        if self.training and action_mask is None:
+            debug_keys = (
+                self.config.action_mask_observation_key,
+                OBS_ACTION_MASK,
+                "action_valid_mask",
+                ACTION,
+            )
+            debug_summary = "; ".join(self._debug_tensor_summary(batch, key) for key in debug_keys)
+            raise ValueError(
+                "PI05 full did not receive an action mask during training. "
+                "Masked pi05_full training requires observation.action_mask/action_valid_mask. "
+                f"Batch debug: {debug_summary}"
+            )
 
         model_outputs = self.model.forward(
             images,
@@ -1796,8 +2256,11 @@ class PI05FullPolicy(PreTrainedPolicy):
             masks,
             actions,
             action_mask=action_mask,
-            subtask_tokens=subtask_tokens,
-            subtask_masks=subtask_masks,
+            subtask_tokens=subtask_tokens if self.config.enable_subtask_branch else None,
+            subtask_masks=subtask_masks if self.config.enable_subtask_branch else None,
+            tactile_tokens=tactile_tokens,
+            tactile_token_masks=tactile_token_masks,
+            tactile_role_metadata=tactile_role_metadata,
         )
         losses = model_outputs["flow_losses"]
         subtask_ce_loss_per_sample = model_outputs["subtask_ce_loss_per_sample"]
@@ -1810,6 +2273,7 @@ class PI05FullPolicy(PreTrainedPolicy):
             expanded_action_mask = action_mask[..., :original_action_dim]
             if expanded_action_mask.ndim == 2:
                 expanded_action_mask = expanded_action_mask[:, None, :]
+            expanded_action_mask = expanded_action_mask.expand_as(losses)
 
         if expanded_action_mask is not None:
             per_dim_denom = expanded_action_mask.sum(dim=[0, 1]).clamp_min(1.0)
@@ -1822,6 +2286,9 @@ class PI05FullPolicy(PreTrainedPolicy):
             "loss_per_dim": loss_per_dim.detach().cpu().numpy().tolist(),
             "subtask_ce_loss": subtask_ce_loss.item(),
         }
+        if expanded_action_mask is not None:
+            loss_dict["action_mask_mean"] = expanded_action_mask.float().mean().item()
+            loss_dict["action_mask_sum"] = expanded_action_mask.float().sum().item()
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
@@ -1830,17 +2297,35 @@ class PI05FullPolicy(PreTrainedPolicy):
                 flow_per_sample_loss = losses.sum(dim=(1, 2)) / per_sample_denom
             else:
                 flow_per_sample_loss = losses.mean(dim=(1, 2))
-            per_sample_loss = flow_per_sample_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss_per_sample
+            per_sample_loss = (
+                self.config.loss_weight_flow * flow_per_sample_loss
+                + self.config.loss_weight_subtask_ce * subtask_ce_loss_per_sample
+            )
             loss_dict["flow_loss"] = flow_per_sample_loss.mean().item()
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
         else:
             # Default: return scalar mean loss
             if expanded_action_mask is not None:
-                flow_loss = losses.sum() / expanded_action_mask.sum().clamp_min(1.0)
+                mask_sum = expanded_action_mask.sum()
+                if self.training and mask_sum <= 0:
+                    debug_keys = (
+                        self.config.action_mask_observation_key,
+                        OBS_ACTION_MASK,
+                        "action_valid_mask",
+                        ACTION,
+                    )
+                    debug_summary = "; ".join(self._debug_tensor_summary(batch, key) for key in debug_keys)
+                    raise ValueError(
+                        "PI05 full received an all-zero action mask during training; "
+                        "flow loss would be fully masked out. Check observation.action_mask/action_valid_mask "
+                        "in the dataset sidecar and preprocessing pipeline. "
+                        f"Batch debug: {debug_summary}"
+                    )
+                flow_loss = losses.sum() / mask_sum.clamp_min(1.0)
             else:
                 flow_loss = losses.mean()
-            loss = flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss
+            loss = self.config.loss_weight_flow * flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss
             loss_dict["flow_loss"] = flow_loss.item()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict

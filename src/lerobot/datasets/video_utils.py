@@ -53,6 +53,38 @@ HW_ENCODERS = [
 VALID_VIDEO_CODECS = {"h264", "hevc", "libsvtav1", "auto"} | set(HW_ENCODERS)
 
 
+def _uses_mov_container(video_key: str) -> bool:
+    lowered = video_key.lower()
+    return any(token in lowered for token in ("deformation", "shear", "depth"))
+
+
+def _is_high_bit_depth_visual_key(video_key: str) -> bool:
+    lowered = video_key.lower()
+    return _uses_mov_container(lowered)
+
+
+def _infer_high_bit_depth_frame_format(frame_data: np.ndarray) -> tuple[str, str]:
+    if frame_data.ndim == 2:
+        return "gray16le", "gray16le"
+    if frame_data.ndim == 3 and frame_data.shape[-1] == 1:
+        return "gray16le", "gray16le"
+    if frame_data.ndim == 3 and frame_data.shape[-1] == 3:
+        return "rgb48le", "rgb48le"
+    raise ValueError(f"Unsupported high-bit-depth frame shape: {frame_data.shape}")
+
+
+def _normalize_high_bit_depth_frame_for_stats(video_key: str, frame_data: np.ndarray) -> np.ndarray:
+    lowered = video_key.lower()
+    frame = frame_data.astype(np.float32)
+    if "depth_deformation" in lowered or "depth_shear" in lowered:
+        depth = np.clip(frame[..., :1] / 3000.0, 0.0, 1.0)
+        motion = np.clip((frame[..., 1:3] - 25000.0) / 10000.0, 0.0, 1.0)
+        return np.concatenate([depth, motion], axis=-1)
+    if "depth" in lowered:
+        return np.clip(frame / 3500.0, 0.0, 1.0)
+    return np.clip(frame / 65535.0, 0.0, 1.0)
+
+
 def _get_codec_options(
     vcodec: str,
     g: int | None = 2,
@@ -331,10 +363,31 @@ def decode_video_frames_av(
 
     video_path_lower = video_path.lower()
     if "tactile" in video_path_lower:
-        if "depth" in video_path_lower:
-            closest_frames = closest_frames.type(torch.float32) / 3500.0
+        closest_frames = closest_frames.type(torch.float32)
+        is_depth_deformation = "depth_deformation" in video_path_lower
+        is_depth_shear = "depth_shear" in video_path_lower
+        if is_depth_deformation or is_depth_shear:
+            # New parsed tactile format packs:
+            #   channel 0: depth in [0, 3000]
+            #   channel 1: deformation/shear x in [25000, 35000]
+            #   channel 2: deformation/shear y in [25000, 35000]
+            # Keep the 3-channel layout so downstream tactile encoders can consume it directly.
+            if closest_frames.ndim == 4 and closest_frames.shape[-1] == 3:
+                depth = torch.clamp(closest_frames[..., :1] / 3000.0, 0.0, 1.0)
+                motion = torch.clamp((closest_frames[..., 1:3] - 25000.0) / 10000.0, 0.0, 1.0)
+                closest_frames = torch.cat([depth, motion], dim=-1).permute(0, 3, 1, 2)
+            elif closest_frames.ndim == 3 and closest_frames.shape[-1] == 3:
+                depth = torch.clamp(closest_frames[..., :1] / 3000.0, 0.0, 1.0)
+                motion = torch.clamp((closest_frames[..., 1:3] - 25000.0) / 10000.0, 0.0, 1.0)
+                closest_frames = torch.cat([depth, motion], dim=-1)
+            else:
+                raise ValueError(
+                    f"Expected 3-channel tactile frames for {video_path}, got shape {tuple(closest_frames.shape)}"
+                )
+        elif "depth" in video_path_lower:
+            closest_frames = torch.clamp(closest_frames / 3500.0, 0.0, 1.0)
         elif any(token in video_path_lower for token in ("deformation", "shear")):
-            closest_frames = (closest_frames.type(torch.float32) - 25000.0) / 10000.0
+            closest_frames = (closest_frames - 25000.0) / 10000.0
             closest_frames = torch.clamp(closest_frames, 0.0, 1.0)
             if closest_frames.ndim == 4 and closest_frames.shape[-1] == 3:
                 closest_frames = closest_frames[..., :2].permute(0, 3, 1, 2)
@@ -507,6 +560,7 @@ def encode_video_frames(
         return
 
     video_path.parent.mkdir(parents=True, exist_ok=True)
+    high_bit_depth_video = _is_high_bit_depth_visual_key(str(video_path))
 
     # Encoders/pixel formats incompatibility check
     if (vcodec == "libsvtav1" or vcodec == "hevc") and pix_fmt == "yuv444p":
@@ -526,6 +580,7 @@ def encode_video_frames(
         raise FileNotFoundError(f"No images found in {imgs_dir}.")
     with Image.open(input_list[0]) as dummy_image:
         width, height = dummy_image.size
+        sample_high_bit_depth_array = np.asarray(dummy_image) if high_bit_depth_video else None
 
     # Define video codec options
     video_options = _get_codec_options(vcodec, g, crf, preset)
@@ -552,16 +607,27 @@ def encode_video_frames(
 
     # Create and open output file (overwrite by default)
     with av.open(str(video_path), "w") as output:
-        output_stream = output.add_stream(vcodec, fps, options=video_options)
-        output_stream.pix_fmt = pix_fmt
+        stream_vcodec = "rawvideo" if high_bit_depth_video else vcodec
+        output_stream = output.add_stream(stream_vcodec, fps, options=video_options if not high_bit_depth_video else None)
+        if high_bit_depth_video:
+            if sample_high_bit_depth_array is None:
+                raise RuntimeError("Missing sample high-bit-depth frame for video encoding.")
+            frame_format, output_pix_fmt = _infer_high_bit_depth_frame_format(sample_high_bit_depth_array)
+            output_stream.pix_fmt = output_pix_fmt
+        else:
+            output_stream.pix_fmt = pix_fmt
         output_stream.width = width
         output_stream.height = height
 
         # Loop through input frames and encode them
         for input_data in input_list:
             with Image.open(input_data) as input_image:
-                input_image = input_image.convert("RGB")
-                input_frame = av.VideoFrame.from_image(input_image)
+                if high_bit_depth_video:
+                    input_array = np.asarray(input_image)
+                    input_frame = av.VideoFrame.from_ndarray(input_array, format=frame_format)
+                else:
+                    input_image = input_image.convert("RGB")
+                    input_frame = av.VideoFrame.from_image(input_image)
                 packet = output_stream.encode(input_frame)
                 if packet:
                     output.mux(packet)
@@ -624,7 +690,7 @@ def concatenate_video_files(
         tmp_concatenate_path, mode="r", format="concat", options={"safe": "0"}
     )  # safe = 0 allows absolute paths as well as relative paths
 
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_named_file:
+    with tempfile.NamedTemporaryFile(suffix=output_video_path.suffix or ".mp4", delete=False) as tmp_named_file:
         tmp_output_video_path = tmp_named_file.name
 
     output_container = av.open(
@@ -673,6 +739,7 @@ class _CameraEncoderThread(threading.Thread):
 
     def __init__(
         self,
+        video_key: str,
         video_path: Path,
         fps: int,
         vcodec: str,
@@ -686,6 +753,7 @@ class _CameraEncoderThread(threading.Thread):
         encoder_threads: int | None = None,
     ):
         super().__init__(daemon=True)
+        self.video_key = video_key
         self.video_path = video_path
         self.fps = fps
         self.vcodec = vcodec
@@ -697,6 +765,9 @@ class _CameraEncoderThread(threading.Thread):
         self.result_queue = result_queue
         self.stop_event = stop_event
         self.encoder_threads = encoder_threads
+        self.high_bit_depth_video = _is_high_bit_depth_visual_key(video_key)
+        self._frame_format: str | None = None
+        self._output_pix_fmt: str | None = None
 
     def run(self) -> None:
         from lerobot.datasets.compute_stats import RunningQuantileStats, auto_downsample_height_width
@@ -721,12 +792,14 @@ class _CameraEncoderThread(threading.Thread):
                     # Sentinel: flush and close
                     break
 
-                # Ensure HWC uint8 numpy array
+                # Ensure HWC numpy array
                 if isinstance(frame_data, np.ndarray):
                     if frame_data.ndim == 3 and frame_data.shape[0] == 3:
                         # CHW -> HWC
                         frame_data = frame_data.transpose(1, 2, 0)
-                    if frame_data.dtype != np.uint8:
+                    if self.high_bit_depth_video and frame_data.dtype == np.uint16:
+                        pass
+                    elif frame_data.dtype != np.uint8:
                         frame_data = (frame_data * 255).astype(np.uint8)
 
                 # Open container on first frame (to get width/height)
@@ -744,15 +817,29 @@ class _CameraEncoderThread(threading.Thread):
                             video_options["threads"] = str(self.encoder_threads)
                     Path(self.video_path).parent.mkdir(parents=True, exist_ok=True)
                     container = av.open(str(self.video_path), "w")
-                    output_stream = container.add_stream(self.vcodec, self.fps, options=video_options)
-                    output_stream.pix_fmt = self.pix_fmt
+                    stream_vcodec = "rawvideo" if self.high_bit_depth_video else self.vcodec
+                    output_stream = container.add_stream(
+                        stream_vcodec,
+                        self.fps,
+                        options=video_options if not self.high_bit_depth_video else None,
+                    )
+                    if self.high_bit_depth_video:
+                        self._frame_format, self._output_pix_fmt = _infer_high_bit_depth_frame_format(frame_data)
+                        output_stream.pix_fmt = self._output_pix_fmt
+                    else:
+                        output_stream.pix_fmt = self.pix_fmt
                     output_stream.width = width
                     output_stream.height = height
                     output_stream.time_base = Fraction(1, self.fps)
 
                 # Encode frame with explicit timestamps
-                pil_img = Image.fromarray(frame_data)
-                video_frame = av.VideoFrame.from_image(pil_img)
+                if self.high_bit_depth_video:
+                    if frame_data.ndim == 3 and frame_data.shape[-1] == 1:
+                        frame_data = frame_data[..., 0]
+                    video_frame = av.VideoFrame.from_ndarray(frame_data, format=self._frame_format)
+                else:
+                    pil_img = Image.fromarray(frame_data)
+                    video_frame = av.VideoFrame.from_image(pil_img)
                 video_frame.pts = frame_count
                 video_frame.time_base = Fraction(1, self.fps)
                 packet = output_stream.encode(video_frame)
@@ -760,7 +847,12 @@ class _CameraEncoderThread(threading.Thread):
                     container.mux(packet)
 
                 # Update stats with downsampled frame (per-channel stats like compute_episode_stats)
-                img_chw = frame_data.transpose(2, 0, 1)  # HWC -> CHW
+                stats_frame = (
+                    _normalize_high_bit_depth_frame_for_stats(self.video_key, frame_data)
+                    if self.high_bit_depth_video
+                    else frame_data
+                )
+                img_chw = stats_frame.transpose(2, 0, 1)  # HWC -> CHW
                 img_downsampled = auto_downsample_height_width(img_chw)
                 # Reshape CHW to (H*W, C) for per-channel stats
                 channels = img_downsampled.shape[0]
@@ -854,9 +946,11 @@ class StreamingVideoEncoder:
             stop_event = threading.Event()
 
             temp_video_dir = Path(tempfile.mkdtemp(dir=temp_dir))
-            video_path = temp_video_dir / f"{video_key.replace('/', '_')}_streaming.mp4"
+            suffix = ".mov" if _uses_mov_container(video_key) else ".mp4"
+            video_path = temp_video_dir / f"{video_key.replace('/', '_')}_streaming{suffix}"
 
             encoder_thread = _CameraEncoderThread(
+                video_key=video_key,
                 video_path=video_path,
                 fps=self.fps,
                 vcodec=self.vcodec,

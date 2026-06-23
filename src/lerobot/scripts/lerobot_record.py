@@ -69,6 +69,7 @@ lerobot-record \
 
 import logging
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
@@ -102,9 +103,11 @@ from lerobot.policies.utils import make_robot_action
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
+    RelativeActionsProcessorStep,
     RobotAction,
     RobotObservation,
     RobotProcessorPipeline,
+    UnnormalizerProcessorStep,
     make_default_processors,
 )
 from lerobot.processor.rename_processor import rename_stats
@@ -141,7 +144,7 @@ from lerobot.teleoperators import (  # noqa: F401
     unitree_g1,
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
-from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.constants import ACTION, OBS_STATE, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
     is_headless,
@@ -217,6 +220,369 @@ class DatasetRecordConfig:
 
 
 @dataclass
+class ManualRelativeLineTestConfig:
+    # Enable manual action injection in the policy inference path. When enabled,
+    # we still reuse the policy pre/post processors but bypass the model forward.
+    enabled: bool = False
+    # Which arm to drive with the synthetic straight-line trajectory.
+    arm: str = "right"
+    # Translation axis for the straight-line test.
+    axis: str = "x"
+    # Per-step delta in canonical action/state units (meters for xyz).
+    step_size: float = 0.01
+    # Number of forward control steps before optionally returning to start.
+    forward_steps: int = 20
+    # Number of initial hold steps before the synthetic trajectory starts moving.
+    hold_steps: int = 10
+    # Whether to generate a symmetric return trajectory after the forward motion.
+    return_to_start: bool = True
+    # Optional per-step gripper delta using the same direction schedule as xyz.
+    gripper_delta: float = 0.0
+    # Log every injected step for debugging.
+    log_every_step: bool = True
+
+    def __post_init__(self) -> None:
+        if self.arm not in {"left", "right"}:
+            raise ValueError(f"`manual_action_test.arm` must be 'left' or 'right', got {self.arm}.")
+        if self.axis not in {"x", "y", "z"}:
+            raise ValueError(f"`manual_action_test.axis` must be one of x/y/z, got {self.axis}.")
+        if self.forward_steps < 1:
+            raise ValueError(f"`manual_action_test.forward_steps` must be >= 1, got {self.forward_steps}.")
+        if self.hold_steps < 0:
+            raise ValueError(f"`manual_action_test.hold_steps` must be >= 0, got {self.hold_steps}.")
+
+
+class ManualRelativeLineTestRunner:
+    def __init__(
+        self,
+        config: ManualRelativeLineTestConfig,
+        policy_cfg: PreTrainedConfig,
+        preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+        postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    ):
+        self.config = config
+        self.policy_cfg = policy_cfg
+        self.preprocessor = preprocessor
+        self.chunk_size = max(1, int(getattr(policy_cfg, "n_action_steps", 1)))
+        self.step_idx = 0
+        self.reference_action: torch.Tensor | None = None
+        self.reference_robot_action: RobotAction | None = None
+
+        action_names = list(getattr(policy_cfg, "action_feature_names", []) or [])
+        self.axis_idx, self.gripper_idx, self.action_dim = self._resolve_action_layout(action_names)
+        self.use_relative_actions = bool(getattr(policy_cfg, "use_relative_actions", False))
+        self.active_arm_pos_start = 0 if self.config.arm == "left" else 10
+        self.active_arm_keyframe_spec = f"{self.active_arm_pos_start}:{self.active_arm_pos_start + 3}"
+        self.uses_local_keyframed_position_axis = (
+            self.use_relative_actions
+            and self.active_arm_keyframe_spec in set(getattr(policy_cfg, "relative_action_keyframes", []))
+        )
+        self.relative_step = next(
+            (step for step in preprocessor.steps if isinstance(step, RelativeActionsProcessorStep)),
+            None,
+        )
+        self.unnormalizer_step = next(
+            (step for step in postprocessor.steps if isinstance(step, UnnormalizerProcessorStep)),
+            None,
+        )
+        if self.unnormalizer_step is None:
+            raise ValueError("manual_action_test requires an UnnormalizerProcessorStep in the policy postprocessor.")
+
+    def _resolve_action_layout(self, action_names: list[str]) -> tuple[int, int | None, int]:
+        axis_name = f"{self.config.arm}_{self.config.axis}"
+        gripper_name = f"gripper_{self.config.arm}"
+
+        if action_names:
+            if axis_name in action_names:
+                axis_idx = action_names.index(axis_name)
+                gripper_idx = action_names.index(gripper_name) if gripper_name in action_names else None
+                return axis_idx, gripper_idx, len(action_names)
+
+            logging.warning(
+                "[manual_action_test] action feature `%s` not found in policy config. "
+                "Falling back to built-in pi05_full canonical layout. action_feature_names=%s",
+                axis_name,
+                action_names,
+            )
+
+        if getattr(self.policy_cfg, "type", None) == "pi05_full":
+            arm_offset = 0 if self.config.arm == "left" else 10
+            axis_offsets = {"x": 0, "y": 1, "z": 2}
+            axis_idx = arm_offset + axis_offsets[self.config.axis]
+            gripper_idx = arm_offset + 9
+            return axis_idx, gripper_idx, 20
+
+        if action_names:
+            raise ValueError(
+                f"manual_action_test could not find action feature `{axis_name}` in policy output names."
+            )
+
+        raise ValueError(
+            "manual_action_test requires `action_feature_names` or a supported built-in policy layout; "
+            f"got policy type {getattr(self.policy_cfg, 'type', None)!r}."
+        )
+
+    def reset(self) -> None:
+        self.step_idx = 0
+        self.reference_action = None
+        self.reference_robot_action = None
+        if hasattr(self, "_lerobot_processed_action_queue"):
+            self._lerobot_processed_action_queue = deque(maxlen=self.chunk_size)
+
+    def _current_canonical_state(self, prepared_observation: dict[str, Any]) -> torch.Tensor:
+        state = self.relative_step._last_state if self.relative_step is not None else None
+        if state is None:
+            state = prepared_observation.get(OBS_STATE)
+        if not isinstance(state, torch.Tensor):
+            raise ValueError("manual_action_test requires `observation.state` to be present after observation prep.")
+
+        current_state = state.squeeze(0) if state.ndim == 2 else state
+        if current_state.ndim != 1 or current_state.shape[-1] < self.action_dim:
+            raise ValueError(
+                "manual_action_test requires canonical observation.state with dim >= action dim, "
+                f"got shape {tuple(current_state.shape)}."
+            )
+        return current_state.to(dtype=torch.float32)
+
+    def _inactive_arm_slice(self) -> slice:
+        return slice(10, 20) if self.config.arm == "left" else slice(0, 10)
+
+    def _active_gripper_key(self) -> str:
+        return f"main_gripper_{self.config.arm}"
+
+    def _inactive_arm_pose_keys(self) -> tuple[str, ...]:
+        inactive_arm = "right" if self.config.arm == "left" else "left"
+        return (
+            f"main_{inactive_arm}_x",
+            f"main_{inactive_arm}_y",
+            f"main_{inactive_arm}_z",
+            f"main_{inactive_arm}_qx",
+            f"main_{inactive_arm}_qy",
+            f"main_{inactive_arm}_qz",
+            f"main_{inactive_arm}_w",
+        )
+
+    def _phase_direction(self, step_idx: int | None = None) -> int:
+        if step_idx is None:
+            step_idx = self.step_idx
+        if step_idx < self.config.hold_steps:
+            return 0
+
+        local_step = step_idx - self.config.hold_steps
+        if local_step < self.config.forward_steps:
+            return 1
+
+        if self.config.return_to_start and local_step < 2 * self.config.forward_steps:
+            return -1
+
+        return 0
+
+    def _target_step_offset(self, step_idx: int | None = None) -> int:
+        if step_idx is None:
+            step_idx = self.step_idx
+        if step_idx < self.config.hold_steps:
+            return 0
+
+        local_step = step_idx - self.config.hold_steps
+        if local_step < self.config.forward_steps:
+            return local_step + 1
+
+        if self.config.return_to_start:
+            if local_step < 2 * self.config.forward_steps:
+                return max(2 * self.config.forward_steps - local_step - 1, 0)
+            return 0
+
+        return self.config.forward_steps
+
+    def _phase_name(self, step_idx: int | None = None) -> str:
+        if step_idx is None:
+            step_idx = self.step_idx
+        if step_idx < self.config.hold_steps:
+            return "hold"
+
+        local_step = step_idx - self.config.hold_steps
+        if local_step < self.config.forward_steps:
+            return "forward"
+        if self.config.return_to_start and local_step < 2 * self.config.forward_steps:
+            return "return"
+        if not self.config.return_to_start:
+            return "hold_final"
+        return "done"
+
+    def build_action_chunk(self, prepared_observation: dict[str, Any]) -> PolicyAction:
+        current_state = self._current_canonical_state(prepared_observation)
+        base_action = current_state[: self.action_dim].clone()
+        if self.reference_action is None:
+            self.reference_action = base_action.clone()
+
+        desired_actions = []
+        chunk_logs: list[tuple[int, str, int, float, float, float, float]] = []
+        for chunk_step in range(self.chunk_size):
+            global_step_idx = self.step_idx + chunk_step
+            desired_action = self.reference_action.clone()
+            desired_action[self._inactive_arm_slice()] = self.reference_action[self._inactive_arm_slice()]
+            if self.gripper_idx is not None and self.config.gripper_delta == 0.0:
+                desired_action[self.gripper_idx] = self.reference_action[self.gripper_idx]
+
+            step_offset = self._target_step_offset(global_step_idx)
+            axis_offset = step_offset * float(self.config.step_size)
+            if axis_offset != 0.0 and not self.uses_local_keyframed_position_axis:
+                desired_action[self.axis_idx] += axis_offset
+
+            gripper_offset = step_offset * float(self.config.gripper_delta)
+            if self.gripper_idx is not None and gripper_offset != 0.0 and not self.use_relative_actions:
+                desired_action[self.gripper_idx] += gripper_offset
+
+            desired_actions.append(desired_action)
+            chunk_logs.append(
+                (
+                    global_step_idx,
+                    self._phase_name(global_step_idx),
+                    step_offset,
+                    axis_offset,
+                    gripper_offset,
+                    desired_action[self.axis_idx].item(),
+                    desired_action[self.axis_idx].item(),
+                )
+            )
+
+        desired_chunk = torch.stack(desired_actions, dim=0).unsqueeze(0)
+
+        if self.use_relative_actions:
+            from lerobot.processor.relative_action_processor import (
+                _compatible_keyframe_specs,
+                _keyframe_specs,
+                _mask_keyframe_dims,
+                to_keyframe_relative_actions,
+                to_relative_actions,
+            )
+
+            raw_action = desired_chunk
+            state_batch = current_state.unsqueeze(0)
+            mask = [True] * self.action_dim
+            specs = _keyframe_specs(
+                getattr(self.policy_cfg, "relative_action_keyframes", []),
+                getattr(self.policy_cfg, "relative_exclude_keys", []),
+            )
+            if specs:
+                compatible_specs = _compatible_keyframe_specs(
+                    specs,
+                    action_dim=self.action_dim,
+                    state_dim=current_state.shape[-1],
+                )
+                raw_action = to_keyframe_relative_actions(
+                    raw_action,
+                    state_batch,
+                    getattr(self.policy_cfg, "relative_action_keyframes", []),
+                    getattr(self.policy_cfg, "relative_exclude_keys", []),
+                )
+                mask = _mask_keyframe_dims(mask, compatible_specs)
+            raw_action = to_relative_actions(raw_action, state_batch, mask)
+
+            for chunk_step, (_, _, _, axis_offset, gripper_offset, _, _) in enumerate(chunk_logs):
+                if axis_offset != 0.0 and self.uses_local_keyframed_position_axis:
+                    raw_action[0, chunk_step, self.axis_idx] += axis_offset
+                if self.gripper_idx is not None and gripper_offset != 0.0:
+                    raw_action[0, chunk_step, self.gripper_idx] += gripper_offset
+        else:
+            raw_action = desired_chunk
+
+        # action_override is injected before the policy postprocessor, so it must mimic
+        # the raw model output space rather than already-unnormalized robot-space values.
+        action = self.unnormalizer_step._apply_transform(  # pyright: ignore[reportPrivateUsage]
+            raw_action,
+            ACTION,
+            self.unnormalizer_step.features[ACTION].type,
+            inverse=False,
+        )
+
+        if self.config.log_every_step:
+            for chunk_step, (global_step_idx, phase_name, step_offset, axis_offset, gripper_offset, target_axis, desired_axis) in enumerate(
+                chunk_logs
+            ):
+                logging.info(
+                    "[manual_action_test_chunk] step=%d chunk_step=%d phase=%s arm=%s axis=%s step_offset=%d axis_offset=%.6f gripper_offset=%.6f relative=%s keyframed_local_axis=%s base_abs_axis=%.6f target_abs_axis=%.6f raw_axis=%.6f normalized_axis=%.6f",
+                    global_step_idx,
+                    chunk_step,
+                    phase_name,
+                    self.config.arm,
+                    self.config.axis,
+                    step_offset,
+                    axis_offset,
+                    gripper_offset,
+                    self.use_relative_actions,
+                    self.uses_local_keyframed_position_axis,
+                    base_action[self.axis_idx].item(),
+                    desired_axis,
+                    raw_action[0, chunk_step, self.axis_idx].item(),
+                    action[0, chunk_step, self.axis_idx].item(),
+                )
+
+        self.step_idx += self.chunk_size
+        return action
+
+    def __call__(self, prepared_observation: dict[str, Any]) -> PolicyAction:
+        return self.build_action_chunk(prepared_observation)
+
+    def stabilize_robot_action(self, robot_action: RobotAction, raw_observation: RobotObservation) -> RobotAction:
+        from lerobot.robots.spark3_pose_gripper.schema import action_dict_from_observation
+
+        stabilized = dict(robot_action)
+        if self.reference_robot_action is None:
+            self.reference_robot_action = action_dict_from_observation(raw_observation)
+
+        reference = self.reference_robot_action
+        for key in self._inactive_arm_pose_keys():
+            if key in reference:
+                stabilized[key] = reference[key]
+
+        inactive_gripper_key = "main_gripper_right" if self.config.arm == "left" else "main_gripper_left"
+        if inactive_gripper_key in reference:
+            stabilized[inactive_gripper_key] = reference[inactive_gripper_key]
+
+        if self.config.gripper_delta == 0.0:
+            active_gripper_key = self._active_gripper_key()
+            if active_gripper_key in reference:
+                stabilized[active_gripper_key] = reference[active_gripper_key]
+
+        for key in (
+            "main_head_x",
+            "main_head_y",
+            "main_head_z",
+            "main_head_qx",
+            "main_head_qy",
+            "main_head_qz",
+            "main_head_w",
+            "main_hip_x",
+            "main_hip_y",
+            "main_hip_z",
+            "main_hip_qx",
+            "main_hip_qy",
+            "main_hip_qz",
+            "main_hip_w",
+            "main_v",
+            "main_w",
+        ):
+            if key in reference:
+                stabilized[key] = reference[key]
+
+        if self.config.log_every_step:
+            logging.info(
+                "[manual_action_test_robot] active_arm=%s active_pose=(%.4f, %.4f, %.4f) active_gripper=%.4f held_other_arm=(%.4f, %.4f, %.4f)",
+                self.config.arm,
+                stabilized.get(f"main_{self.config.arm}_x", float("nan")),
+                stabilized.get(f"main_{self.config.arm}_y", float("nan")),
+                stabilized.get(f"main_{self.config.arm}_z", float("nan")),
+                stabilized.get(self._active_gripper_key(), float("nan")),
+                stabilized.get(self._inactive_arm_pose_keys()[0], float("nan")),
+                stabilized.get(self._inactive_arm_pose_keys()[1], float("nan")),
+                stabilized.get(self._inactive_arm_pose_keys()[2], float("nan")),
+            )
+
+        return stabilized
+
+
+@dataclass
 class RecordConfig:
     robot: RobotConfig
     dataset: DatasetRecordConfig
@@ -239,6 +605,9 @@ class RecordConfig:
     # Action interpolation multiplier for smoother policy control (1=off, 2=2x, 3=3x)
     # Only applies when using a policy (not teleop)
     interpolation_multiplier: int = 1
+    # Optional manual trajectory test that bypasses model forward while keeping
+    # the inference pre/post-processing and robot action conversion unchanged.
+    manual_action_test: ManualRelativeLineTestConfig = field(default_factory=ManualRelativeLineTestConfig)
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -252,6 +621,12 @@ class RecordConfig:
 
         if self.teleop is None and self.policy is None:
             raise ValueError("Choose a policy, a teleoperator or both to control the robot")
+        if self.manual_action_test.enabled and self.policy is None:
+            raise ValueError("manual_action_test requires `--policy.path` so the policy processors can be reused.")
+        if self.manual_action_test.enabled and self.policy is not None and self.policy.type != "pi05_full":
+            raise ValueError(
+                f"manual_action_test currently supports only pi05_full policies, got {self.policy.type}."
+            )
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -313,6 +688,7 @@ def record_loop(
     display_data: bool = False,
     interpolator: ActionInterpolator | None = None,
     display_compressed_images: bool = False,
+    manual_action_test_runner: ManualRelativeLineTestRunner | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -347,6 +723,8 @@ def record_loop(
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
+        if manual_action_test_runner is not None:
+            manual_action_test_runner.reset()
 
     # Reset interpolator if provided
     if interpolator is not None:
@@ -398,9 +776,17 @@ def record_loop(
                         use_amp=policy.config.use_amp,
                         task=single_task,
                         robot_type=robot.robot_type,
+                        raw_observation=obs_processed,
+                        action_override=manual_action_test_runner
+                        if manual_action_test_runner is not None
+                        else None,
                     )
                     act_processed_policy = make_robot_action(action_values, dataset.features)
                     robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+                    if manual_action_test_runner is not None:
+                        robot_action_to_send = manual_action_test_runner.stabilize_robot_action(
+                            robot_action_to_send, obs
+                        )
 
                     action_tensor = torch.tensor([robot_action_to_send[k] for k in action_keys])
                     interpolator.add(action_tensor)
@@ -424,10 +810,18 @@ def record_loop(
                     use_amp=policy.config.use_amp,
                     task=single_task,
                     robot_type=robot.robot_type,
+                    raw_observation=obs_processed,
+                    action_override=manual_action_test_runner
+                    if manual_action_test_runner is not None
+                    else None,
                 )
                 act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
                 # Applies a pipeline to the action, default is IdentityProcessor
                 robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+                if manual_action_test_runner is not None:
+                    robot_action_to_send = manual_action_test_runner.stabilize_robot_action(
+                        robot_action_to_send, obs
+                    )
                 action_values = robot_action_to_send
 
         elif policy is None and isinstance(teleop, Teleoperator):
@@ -565,6 +959,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         preprocessor = None
         postprocessor = None
         interpolator = None
+        manual_action_test_runner = None
         if cfg.policy is not None:
             preprocessor, postprocessor = make_pre_post_processors(
                 policy_cfg=cfg.policy,
@@ -579,6 +974,24 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             if cfg.interpolation_multiplier > 1:
                 interpolator = ActionInterpolator(multiplier=cfg.interpolation_multiplier)
                 logging.info(f"Action interpolation enabled: {cfg.interpolation_multiplier}x control rate")
+            if cfg.manual_action_test.enabled:
+                manual_action_test_runner = ManualRelativeLineTestRunner(
+                    cfg.manual_action_test,
+                    cfg.policy,
+                    preprocessor,
+                    postprocessor,
+                )
+                logging.info(
+                    "Manual action test enabled: arm=%s axis=%s step_size=%.6f forward_steps=%d hold_steps=%d return_to_start=%s gripper_delta=%.6f relative=%s",
+                    cfg.manual_action_test.arm,
+                    cfg.manual_action_test.axis,
+                    cfg.manual_action_test.step_size,
+                    cfg.manual_action_test.forward_steps,
+                    cfg.manual_action_test.hold_steps,
+                    cfg.manual_action_test.return_to_start,
+                    cfg.manual_action_test.gripper_delta,
+                    getattr(cfg.policy, "use_relative_actions", False),
+                )
 
         robot.connect()
         if teleop is not None:
@@ -612,6 +1025,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_data=cfg.display_data,
                     interpolator=interpolator,
                     display_compressed_images=display_compressed_images,
+                    manual_action_test_runner=manual_action_test_runner,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment

@@ -71,6 +71,79 @@ sidecar 还会提供这些常用字段：
 - `prev_action` / `prev_action_valid_mask`: 给需要 previous action conditioning 的实验使用。
 - `task_vlm_caption` / `subtask_text_sidecar` / `next_subtask_text_sidecar` / `user_prompt_sidecar`: 给 `pi05_full` 的文本增强或阶段训练使用；`pi05` 可忽略额外字段。
 
+### 2.4 Obs 名字兼容和推荐统一名
+
+当前仓库对一部分 Sparky / UMI 历史命名做了兼容处理，因此原始数据里使用不同名字，很多情况下也能正常训练。
+
+但这里的“兼容”含义是：
+
+- 原始名字 A 和原始名字 B 会被 alias 到同一个 canonical 语义
+- 不是两套名字同时作为两个独立输入模态参与训练
+
+也就是说，最终训练看的是“统一后的语义位置”，不是“同一信息出现两份”。
+
+目前常见兼容主要包括：
+
+- 相机名字兼容
+  - `observation.images.left_cam_left` -> `observation.images.cam_left`
+  - `observation.images.right_cam_right` -> `observation.images.cam_right`
+
+- Sparky tactile 名字兼容
+  - 当前推荐统一使用下面这 4 个 canonical key：
+    - `observation.depth_deformation.tactile_left_left`
+    - `observation.depth_deformation.tactile_left_right`
+    - `observation.depth_deformation.tactile_right_left`
+    - `observation.depth_deformation.tactile_right_right`
+  - 新版数据如果已经是：
+    - 左手：`observation.depth_deformation.tactile_left_left` + `observation.depth_deformation.tactile_left_right`
+    - 右手：`observation.depth_deformation.tactile_right_left` + `observation.depth_deformation.tactile_right_right`
+    - 双手：以上四个 key 同时存在
+    - 那么可以直接训练，不需要额外适配
+  - 历史单臂兼容仍然保留：
+    - 左臂单臂老数据：`observation.depth_deformation.tactile_left_left` + `observation.depth_deformation.tactile_right_left`
+      - 训练时会自动解释为：
+        - `observation.depth_deformation.tactile_left_left`
+        - `observation.depth_deformation.tactile_left_right`
+    - 右臂单臂老数据：`observation.depth_deformation.tactile_left_left` + `observation.depth_deformation.tactile_right_left`
+      - 训练时会自动解释为：
+        - `observation.depth_deformation.tactile_right_left`
+        - `observation.depth_deformation.tactile_right_right`
+
+- 当前 `multi_dataset.py` 里实际保留的兼容 key 总结
+  - RGB canonical
+    - `observation.images.cam_left`
+    - `observation.images.cam_right`
+  - RGB 历史别名
+    - `observation.images.left_cam_left`
+    - `observation.images.right_cam_right`
+  - tactile canonical
+    - `observation.depth_deformation.tactile_left_left`
+    - `observation.depth_deformation.tactile_left_right`
+    - `observation.depth_deformation.tactile_right_left`
+    - `observation.depth_deformation.tactile_right_right`
+  - tactile 历史单臂模式
+    - `observation.depth_deformation.tactile_left_left`
+    - `observation.depth_deformation.tactile_right_left`
+    - 这对老 key 会根据相机侧别自动映射成“左手一对”或“右手一对”
+
+如果你在写新的 sidecar、训练配置或说明文档，建议尽量统一使用下面这组 canonical 名字：
+
+- RGB
+  - `observation.images.cam_left`
+  - `observation.images.cam_right`
+
+- tactile
+  - `observation.depth_deformation.tactile_left_left`
+  - `observation.depth_deformation.tactile_left_right`
+  - `observation.depth_deformation.tactile_right_left`
+  - `observation.depth_deformation.tactile_right_right`
+
+这样做的好处是：
+
+- 配置更清楚
+- 后续排查左右手语义更容易
+- 接 tactile 分支时不容易混淆历史别名
+
 ## 3. Rot6D 表示
 
 旋转统一使用 `rot6d`，不是欧拉角或四元数。`rot6d` 是旋转矩阵前两列拼成的 6 个数：
@@ -186,6 +259,77 @@ gripper = clip(raw_gripper, -0.436, 0.0) / -0.436
 
 因此 `0 -> 0`，`-0.218 -> 0.5`，`-0.436` 以及更小值都会变成 `1`。归一化后的 gripper 在 sidecar 中保存为 framewise 连续值，训练时再按 chunk relative 转换。
 
+### 5.2 真机数据
+
+以下 `robot_type` 会按真机数据处理：
+
+```text
+spark3_pose_gripper
+```
+
+真机数据与 UMI 的主要区别是：
+
+- pose 不会再转换到每个 episode 的 anchor 坐标系
+- sidecar 会保留数据集原始坐标系下的 absolute pose
+- 但可以在生成 sidecar 时，显式把某一只手从 canonical state/action supervision 里 mask 掉
+
+对应脚本参数在 [build_pi05_canonical_sidecar.py](/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/build_pi05_canonical_sidecar.py:82)：
+
+```bash
+--real-mask-arm {none,left,right}
+```
+
+它只在解析后的 `dataset_type == real` 时生效，默认值是：
+
+```bash
+--real-mask-arm none
+```
+
+也就是：
+
+- `none`：左右手都保留监督
+- `left`：把左臂从 canonical supervision 里屏蔽掉
+- `right`：把右臂从 canonical supervision 里屏蔽掉
+
+脚本里的实际处理逻辑在 [build_pi05_canonical_sidecar.py](/mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/build_pi05_canonical_sidecar.py:465)：
+
+- 如果是真机数据，且 `real_mask_arm` 命中了当前 arm
+- 则会把这一侧的 `state_arm_mask` 全部置 0
+- 同时把这一侧的 `action_mask` 全部置 0
+
+注意这里 mask 掉的是“监督信号”，不是直接删除数值本身：
+
+- `canonical_state` / `canonical_action` 数值仍然会写进 sidecar
+- 但训练时真正控制 loss 是否生效的是：
+  - `state_mask`
+  - `action_valid_mask`
+
+因此一旦某一侧 arm 被 mask：
+
+- 这只手对应的 state 维度不会参与 state 有效性监督
+- 这只手对应的 action 维度不会参与 action loss
+- 另一只手仍然正常保留
+
+这对“真机单臂数据按双臂 canonical 格式训练”尤其有用。例如：
+
+- 右臂真机数据，只想监督右臂，可以设置：
+
+```bash
+--dataset-type real --real-mask-arm left
+```
+
+- 左臂真机数据，只想监督左臂，可以设置：
+
+```bash
+--dataset-type real --real-mask-arm right
+```
+
+- 双臂真机数据，想保留完整双臂监督，则使用：
+
+```bash
+--dataset-type real --real-mask-arm none
+```
+
 UMI 训练默认使用全局：
 这个可以根据自身系统的实际情况进行修改，粗略算的话就是系统模型推理时间按照30帧算得到的帧数
 
@@ -193,7 +337,7 @@ UMI 训练默认使用全局：
 --policy.action_gap_frames=6
 ```
 
-### 5.2 真机数据
+### 5.3 真机数据action_gap_frames
 
 以下 `robot_type` 会按真机数据处理：
 

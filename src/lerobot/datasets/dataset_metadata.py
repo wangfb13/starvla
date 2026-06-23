@@ -52,7 +52,7 @@ from lerobot.datasets.utils import (
     update_chunk_file_indices,
 )
 from lerobot.datasets.video_utils import get_video_info
-from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE
+from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE, OBS_ACTION_MASK, OBS_STATE_MASK
 
 CODEBASE_VERSION = "v3.0"
 VISUAL_FEATURE_DTYPES = {"image", "video", "tactile", "depth"}
@@ -545,10 +545,24 @@ class LeRobotDatasetMetadata:
                 "subtask_text_sidecar",
                 "next_subtask_text_sidecar",
                 "dataset_index",
+                "action_valid_mask",
+                "state_mask",
+                OBS_ACTION_MASK,
+                OBS_STATE_MASK,
             }:
                 canonical[key] = value
             elif key.endswith("_is_pad") or key.endswith("_is_missing"):
                 canonical[key] = value
+
+        if "action_valid_mask" in canonical:
+            canonical[OBS_ACTION_MASK] = canonical["action_valid_mask"]
+        elif OBS_ACTION_MASK in canonical:
+            canonical["action_valid_mask"] = canonical[OBS_ACTION_MASK]
+
+        if "state_mask" in canonical:
+            canonical[OBS_STATE_MASK] = canonical["state_mask"]
+        elif OBS_STATE_MASK in canonical:
+            canonical["state_mask"] = canonical[OBS_STATE_MASK]
 
         # Keep language-side complementary keys structurally stable so the default
         # DataLoader collate_fn does not fail when some frames lack subtask annotations.
