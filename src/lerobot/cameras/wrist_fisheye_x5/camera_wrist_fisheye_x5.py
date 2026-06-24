@@ -34,6 +34,40 @@ from .configuration_wrist_fisheye_x5 import WirstFisheyeCameraX5Config
 logger = logging.getLogger(__name__)
 
 
+def _center_crop_bounds(width: int, height: int, crop_size: int) -> tuple[int, int]:
+    if crop_size > width or crop_size > height:
+        raise ValueError(f"crop_size={crop_size} exceeds frame size {width}x{height}")
+    x0 = (width - crop_size) // 2
+    y0 = (height - crop_size) // 2
+    return x0, y0
+
+
+def _center_crop(image: NDArray[Any], crop_size: int) -> NDArray[Any]:
+    height, width = image.shape[:2]
+    x0, y0 = _center_crop_bounds(width, height, crop_size)
+    return image[y0 : y0 + crop_size, x0 : x0 + crop_size]
+
+
+def _scale_camera_matrix(
+    camera_matrix: NDArray[Any],
+    source_wh: tuple[int, int],
+    target_wh: tuple[int, int],
+) -> NDArray[Any]:
+    src_w, src_h = source_wh
+    dst_w, dst_h = target_wh
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"Invalid calibration resolution {source_wh}")
+
+    scale_x = dst_w / src_w
+    scale_y = dst_h / src_h
+    scaled = camera_matrix.copy().astype(np.float64)
+    scaled[0, 0] *= scale_x
+    scaled[0, 2] *= scale_x
+    scaled[1, 1] *= scale_y
+    scaled[1, 2] *= scale_y
+    return scaled
+
+
 class WristFisheyeX5Camera(Camera):
     def __init__(self, config: WirstFisheyeCameraX5Config):
         super().__init__(config)
@@ -44,7 +78,10 @@ class WristFisheyeX5Camera(Camera):
         self.color_mode = config.color_mode
         self.warmup_s = config.warmup_s
         self.intrinsics = config.intrinsics
+        self.enable_undistort_crop = config.enable_undistort_crop
+        self.undistort_crop_size = config.undistort_crop_size
         self.rotation: int | None = get_cv2_rotation(config.rotation)
+        self._undistort_cache: dict[tuple[int, int, int], tuple[NDArray[Any], NDArray[Any], int]] = {}
 
         self.capture_width = self.width
         self.capture_height = self.height
@@ -53,6 +90,16 @@ class WristFisheyeX5Camera(Camera):
             cv2.ROTATE_90_COUNTERCLOCKWISE,
         ]:
             self.capture_width, self.capture_height = self.height, self.width
+
+        if self.enable_undistort_crop and self.capture_width and self.capture_height:
+            crop_size = self.undistort_crop_size or min(self.capture_width, self.capture_height)
+            if crop_size > min(self.capture_width, self.capture_height):
+                raise ValueError(
+                    f"`undistort_crop_size={crop_size}` exceeds configured stream size "
+                    f"{self.capture_width}x{self.capture_height}"
+                )
+            self.width = crop_size
+            self.height = crop_size
 
         self.context: Any | None = None
         self.socket: Any | None = None
@@ -171,6 +218,69 @@ class WristFisheyeX5Camera(Camera):
             self.context.term()
             self.context = None
 
+    def _get_intrinsics_entry(
+        self,
+        frame_wh: tuple[int, int] | None = None,
+    ) -> tuple[NDArray[Any], NDArray[Any], tuple[int, int]]:
+        if not self.intrinsics:
+            raise ValueError("Fisheye undistort is enabled but no intrinsics are available.")
+
+        preferred_key = None if frame_wh is None else f"{frame_wh[0]}x{frame_wh[1]}"
+        selected_key = preferred_key if preferred_key in self.intrinsics else next(iter(self.intrinsics))
+        entry = self.intrinsics[selected_key]
+        camera_matrix = np.array(entry["camera_matrix"], dtype=np.float64)
+        dist_coeffs = np.array(entry["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
+
+        image_size = entry.get("image_size")
+        if image_size is None:
+            try:
+                width_str, height_str = selected_key.split("x", maxsplit=1)
+                image_size = [int(width_str), int(height_str)]
+            except Exception as exc:
+                raise ValueError(
+                    "Unable to infer fisheye calibration image_size from intrinsics entry. "
+                    f"Got key={selected_key!r}, entry keys={list(entry.keys())}"
+                ) from exc
+
+        calib_wh = (int(image_size[0]), int(image_size[1]))
+        return camera_matrix, dist_coeffs, calib_wh
+
+    def _get_undistort_maps(self, frame_shape: tuple[int, ...]) -> tuple[NDArray[Any], NDArray[Any], int]:
+        frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+        crop_size = self.undistort_crop_size or min(frame_w, frame_h)
+        cache_key = (frame_w, frame_h, crop_size)
+        cached = self._undistort_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        camera_matrix, dist_coeffs, calib_wh = self._get_intrinsics_entry((frame_w, frame_h))
+        scaled_camera_matrix = _scale_camera_matrix(camera_matrix, calib_wh, (frame_w, frame_h))
+        map1, map2 = cv2.fisheye.initUndistortRectifyMap(
+            scaled_camera_matrix,
+            dist_coeffs,
+            np.eye(3),
+            scaled_camera_matrix.copy(),
+            (frame_w, frame_h),
+            cv2.CV_16SC2,
+        )
+        cached = (map1, map2, crop_size)
+        self._undistort_cache[cache_key] = cached
+        return cached
+
+    def _maybe_undistort_crop(self, frame: NDArray[Any]) -> NDArray[Any]:
+        if not self.enable_undistort_crop:
+            return frame
+
+        map1, map2, crop_size = self._get_undistort_maps(frame.shape)
+        undistorted = cv2.remap(
+            frame,
+            map1,
+            map2,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        return _center_crop(undistorted, crop_size)
+
     def _read_from_hardware(self) -> NDArray[Any]:
         if not self.is_connected or self.socket is None:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -186,15 +296,19 @@ class WristFisheyeX5Camera(Camera):
         if frame_bgr is None:
             raise RuntimeError(f"{self} failed to decode JPEG frame.")
 
+        frame_bgr = self._maybe_undistort_crop(frame_bgr)
+
         if self.capture_width and self.capture_height:
-            if frame_bgr.shape[1] != self.capture_width or frame_bgr.shape[0] != self.capture_height:
+            expected_width = self.width if self.enable_undistort_crop else self.capture_width
+            expected_height = self.height if self.enable_undistort_crop else self.capture_height
+            if frame_bgr.shape[1] != expected_width or frame_bgr.shape[0] != expected_height:
                 logger.debug(
                     "%s resolution mismatch: got %sx%s, expected %sx%s",
                     self,
                     frame_bgr.shape[1],
                     frame_bgr.shape[0],
-                    self.capture_width,
-                    self.capture_height,
+                    expected_width,
+                    expected_height,
                 )
 
         if self.color_mode == ColorMode.RGB:

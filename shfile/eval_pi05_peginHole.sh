@@ -13,7 +13,9 @@ python src/lerobot/scripts/lerobot_record.py \
       "width": 1920,
       "height": 1080,
       "fps": 30,
-      "intrinsics_file": "/home/cxzk/DM_das/lerobot_spark_x5_armjoints/run_scripts/intrinsics_data/left_rgb_video_ros-camchain.yaml"
+      "intrinsics_file": "/home/cxzk/DM_das/lerobot_spark_x5_armjoints/run_scripts/intrinsics_data/left_rgb_video_ros-camchain.yaml",
+      "enable_undistort_crop": false,
+      "undistort_crop_size": null
     },
     "cam_right_wrist": {
       "type": "wirstFisheyeX5",
@@ -21,7 +23,9 @@ python src/lerobot/scripts/lerobot_record.py \
       "width": 1920,
       "height": 1080,
       "fps": 30,
-      "intrinsics_file": "/home/cxzk/DM_das/lerobot_spark_x5_armjoints/run_scripts/intrinsics_data/right_rgb_video_ros-camchain.yaml"
+      "intrinsics_file": "/home/cxzk/DM_das/lerobot_spark_x5_armjoints/run_scripts/intrinsics_data/right_rgb_video_ros-camchain.yaml",
+      "enable_undistort_crop": false,
+      "undistort_crop_size": null
     }
   }' \
   --display_data=false \

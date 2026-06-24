@@ -46,6 +46,8 @@ class WirstFisheyeCameraX5Config(CameraConfig):
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
     intrinsics_file: str | None = None
     intrinsics: dict | None = None
+    enable_undistort_crop: bool = False
+    undistort_crop_size: int | None = None
     warmup_s: int = 1
     mock: bool = False
     use_gpu_decode: bool = False
@@ -64,7 +66,14 @@ class WirstFisheyeCameraX5Config(CameraConfig):
                 "For `fps`, `width` and `height`, either all of them need to be set, or none of them."
             )
 
+        if self.undistort_crop_size is not None and self.undistort_crop_size <= 0:
+            raise ValueError("`undistort_crop_size` must be a positive integer when provided.")
+
         self.intrinsics_file = _resolve_intrinsics_path(self.intrinsics_file)
+        if self.enable_undistort_crop and not self.intrinsics_file and not self.intrinsics:
+            raise ValueError(
+                "`enable_undistort_crop=True` requires either `intrinsics_file` or preloaded `intrinsics`."
+            )
         if self.intrinsics_file and not self.intrinsics:
             self.intrinsics = self._load_intrinsics(Path(self.intrinsics_file))
 
@@ -79,16 +88,26 @@ class WirstFisheyeCameraX5Config(CameraConfig):
             with path.open() as f:
                 intrinsics_data = json.load(f)
 
-            required_keys = ["camera_matrix", "dist_coeffs", "image_size"]
-            missing_keys = [key for key in required_keys if key not in intrinsics_data]
+            dist_coeffs = intrinsics_data.get("dist_coeffs", intrinsics_data.get("distortion_coeffs"))
+            image_size = intrinsics_data.get("image_size", intrinsics_data.get("resolution"))
+            required_values = {
+                "camera_matrix": intrinsics_data.get("camera_matrix"),
+                "dist_coeffs/distortion_coeffs": dist_coeffs,
+                "image_size/resolution": image_size,
+            }
+            missing_keys = [key for key, value in required_values.items() if value is None]
             if missing_keys:
                 raise KeyError(
-                    f"Expected keys {required_keys} in JSON intrinsics file, missing {missing_keys}."
+                    "Expected wrist fisheye JSON intrinsics to contain camera_matrix, "
+                    "dist_coeffs/distortion_coeffs and image_size/resolution, "
+                    f"missing {missing_keys}."
                 )
 
             camera_matrix = intrinsics_data["camera_matrix"]
-            dist_coeffs = intrinsics_data["dist_coeffs"]
-            image_size = intrinsics_data["image_size"]
+            if intrinsics_data.get("distortion_model") not in {None, "equidistant", "fisheye"}:
+                raise ValueError(
+                    f"Unsupported distortion_model={intrinsics_data.get('distortion_model')!r} in {path}."
+                )
         elif suffix in {".yaml", ".yml", ".yam"}:
             with path.open() as f:
                 intrinsics_data = yaml.safe_load(f)
@@ -118,15 +137,17 @@ class WirstFisheyeCameraX5Config(CameraConfig):
                 f"Unsupported intrinsics file extension `{suffix}` for {path}. Expected .json or .yaml/.yml."
             )
 
-        if list(image_size) != [1920, 1080]:
+        if not isinstance(image_size, (list, tuple)) or len(image_size) != 2:
             raise ValueError(
-                f"Wrist fisheye intrinsics currently only support 1920x1080, got {image_size}."
+                f"Expected `image_size`/`resolution` to contain [width, height], got {image_size}."
             )
+        image_width, image_height = int(image_size[0]), int(image_size[1])
+        target_resolution = f"{image_width}x{image_height}"
 
         return {
-            "1920x1080": {
+            target_resolution: {
                 "camera_matrix": camera_matrix,
                 "dist_coeffs": dist_coeffs,
+                "image_size": [image_width, image_height],
             }
         }
-

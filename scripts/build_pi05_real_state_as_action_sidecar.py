@@ -284,6 +284,8 @@ def build_sidecar_for_dataset(
     )
 
     task_text = resolve_task_text(dataset_root)
+    # Reuse the canonical sidecar helper so real-robot and mixed-data pipelines
+    # share the same inclusive [start, end] subtask interval semantics.
     subtask_text, next_subtask_text = build_subtask_columns(frame_df, dataset_root)
     framewise_df = pd.DataFrame(
         {
@@ -370,6 +372,7 @@ def build_sidecar_for_dataset(
         "state_valid_ratio_by_dim": state_valid_ratio.astype(float).tolist(),
         "arm_anchor_counts": canonical["arm_anchor_counts"],
         "task_vlm_caption_nonempty": bool(task_text.strip()),
+        "subtask_frame_interval_mode": "inclusive_closed_interval_[start,end]",
         "subtask_text_nonempty_ratio": float((pd.Series(subtask_text).astype(str).str.strip() != "").mean()),
         "next_subtask_text_nonempty_ratio": float(
             (pd.Series(next_subtask_text).astype(str).str.strip() != "").mean()

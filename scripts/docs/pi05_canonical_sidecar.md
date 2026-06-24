@@ -24,6 +24,11 @@ The canonical schema follows the current repo's `pi05_full` contract:
 - `arm_present_mask`: 2D left/right arm presence.
 - `state_present`: scalar frame-level state availability.
 
+If `meta/subtasks.parquet` exists, the builder also writes
+`subtask_text_sidecar` and `next_subtask_text_sidecar`. The source
+`frames` field is interpreted as an inclusive interval `[start, end]`, so
+both boundary frames inherit the same subtask label.
+
 ## Dataset Type
 
 By default, use `--dataset-type auto`. The script reads each dataset's `meta/info.json`

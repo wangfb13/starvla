@@ -581,7 +581,9 @@ def build_subtask_columns(frame_df: pd.DataFrame, dataset_root: Path) -> tuple[l
             end_frame = int(frames[1])
         except (TypeError, ValueError):
             continue
-        if end_frame <= start_frame:
+        # The source metadata stores frame ranges as inclusive [start, end].
+        # Keep that contract here so subtask labels do not drop the right boundary.
+        if end_frame < start_frame:
             continue
 
         subtask_text = resolve_subtask_text(row, ("subtask", "instruction", "description", "skill"))
@@ -600,12 +602,12 @@ def build_subtask_columns(frame_df: pd.DataFrame, dataset_root: Path) -> tuple[l
         for start_frame, end_frame, subtask_text, future_text in entries:
             local_start = start_frame - base_start
             local_end = end_frame - base_start
-            if local_end <= local_start:
+            if local_end < local_start:
                 continue
             mask = (
                 (episode_values == episode_index)
                 & (frame_values >= local_start)
-                & (frame_values < local_end)
+                & (frame_values <= local_end)
             )
             current[mask] = subtask_text
             next_text[mask] = future_text

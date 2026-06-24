@@ -98,6 +98,14 @@ sidecar 还会写出：
 
 这些字段的格式和已有 `build_pi05_canonical_sidecar.py` 基本一致，训练侧可以复用现有读取逻辑。
 
+其中如果原始数据集存在 `meta/subtasks.parquet`，脚本会同步写出：
+
+- `subtask_text_sidecar`
+- `next_subtask_text_sidecar`
+
+这里会按 `subtasks.parquet` 里的 `frames=[start, end]` 作为左右全包区间处理，
+也就是 `start` 和 `end` 两帧都会被打上对应的 subtask 文本，不再按右开区间处理。
+
 ## 3. 适用数据集
 
 这个脚本只接受真机数据。
@@ -186,9 +194,9 @@ python3 scripts/build_pi05_real_state_as_action_sidecar.py \
 ### 6.3 用 txt 批量处理多个真机数据集
 
 ```bash
-python3 scripts/build_pi05_real_state_as_action_sidecar.py \
-  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_roots.txt \
-  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction \
+python3 scripts/build_pi05_real_state_as_action_state_gripper_sidecar.py \
+  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_R7_norotation_roots.txt \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_R7norotation60 \
   --real-mask-arm none \
   --overwrite
 
@@ -202,7 +210,14 @@ python3 scripts/build_pi05_real_state_as_action_sidecar.py \
 
 python3 scripts/build_pi05_real_state_as_action_sidecar.py \
   --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_roots.txt \
-  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_withSubtasks \
+  --real-mask-arm none \
+  --overwrite
+
+
+python3 scripts/build_pi05_real_state_as_action_state_gripper_sidecar.py \
+  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_R7_undist_roots.txt \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_R7_stateGripperUndist \
   --real-mask-arm none \
   --overwrite
 ```
