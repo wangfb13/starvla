@@ -144,7 +144,7 @@ def update_policy(
         accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
 
     train_metrics.loss = loss.item()
-    for metric_name in ("flow_loss", "subtask_ce_loss", "action_mask_mean", "action_mask_sum"):
+    for metric_name in ("flow_loss", "subtask_ce_loss", "inter_arm_pos_loss", "action_mask_mean", "action_mask_sum"):
         if metric_name in output_dict and metric_name in train_metrics.metrics:
             setattr(train_metrics, metric_name, output_dict[metric_name])
     train_metrics.grad_norm = grad_norm.item()
@@ -432,6 +432,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         "loss": AverageMeter("loss", ":.3f"),
         "flow_loss": AverageMeter("flow", ":.3e"),
         "subtask_ce_loss": AverageMeter("sub_ce", ":.3f"),
+        "inter_arm_pos_loss": AverageMeter("iarm", ":.3e"),
         "action_mask_mean": AverageMeter("actm", ":.3f"),
         "action_mask_sum": AverageMeter("acts", ":.1f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),

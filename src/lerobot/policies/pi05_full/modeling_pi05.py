@@ -1100,6 +1100,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         flow_losses = F.mse_loss(u_t, v_t, reduction="none")
         if action_mask is not None:
             flow_losses = flow_losses * action_mask
+        predicted_actions = x_t - time_expanded * v_t
 
         subtask_ce_loss = torch.zeros(actions.shape[0], device=actions.device, dtype=torch.float32)
         use_subtask_branch = self.config.enable_subtask_branch and subtask_tokens is not None and subtask_masks is not None
@@ -1123,6 +1124,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return {
             "flow_losses": flow_losses,
+            "predicted_actions": predicted_actions,
             "subtask_ce_loss_per_sample": subtask_ce_loss,
         }
 
@@ -1645,6 +1647,7 @@ class PI05FullPolicy(PreTrainedPolicy):
         self._cached_subtask_prompt_tokens: Tensor | None = None
         self._cached_subtask_prompt_masks: Tensor | None = None
         self._last_subtask_time: float | None = None
+        self._inter_arm_position_indices_cache: tuple[tuple[int, int, int], tuple[int, int, int]] | None | bool = None
 
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
@@ -1661,6 +1664,98 @@ class PI05FullPolicy(PreTrainedPolicy):
 
     def _rtc_enabled(self) -> bool:
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
+
+    @staticmethod
+    def _find_feature_index(names: list[str] | None, candidates: list[str]) -> int | None:
+        if names is None:
+            return None
+        lowered = {str(name).lower(): idx for idx, name in enumerate(names)}
+        for candidate in candidates:
+            idx = lowered.get(candidate.lower())
+            if idx is not None:
+                return idx
+        return None
+
+    def _resolve_inter_arm_position_indices(self, action_dim: int) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+        cached = getattr(self, "_inter_arm_position_indices_cache", None)
+        if cached is False:
+            return None
+        if isinstance(cached, tuple):
+            return cached
+
+        action_names = getattr(self.config, "action_feature_names", None)
+        left_candidates = {
+            "x": ["left_x", "main_left_x", "left_arm_pose.x", "left_pose.x"],
+            "y": ["left_y", "main_left_y", "left_arm_pose.y", "left_pose.y"],
+            "z": ["left_z", "main_left_z", "left_arm_pose.z", "left_pose.z"],
+        }
+        right_candidates = {
+            "x": ["right_x", "main_right_x", "right_arm_pose.x", "right_pose.x"],
+            "y": ["right_y", "main_right_y", "right_arm_pose.y", "right_pose.y"],
+            "z": ["right_z", "main_right_z", "right_arm_pose.z", "right_pose.z"],
+        }
+
+        left_indices = tuple(
+            self._find_feature_index(action_names, left_candidates[axis]) for axis in ("x", "y", "z")
+        )
+        right_indices = tuple(
+            self._find_feature_index(action_names, right_candidates[axis]) for axis in ("x", "y", "z")
+        )
+
+        if any(idx is None for idx in left_indices + right_indices):
+            if action_dim >= 13:
+                resolved = ((0, 1, 2), (10, 11, 12))
+                self._inter_arm_position_indices_cache = resolved
+                return resolved
+            self._inter_arm_position_indices_cache = False
+            return None
+
+        resolved = (
+            tuple(int(idx) for idx in left_indices),
+            tuple(int(idx) for idx in right_indices),
+        )
+        self._inter_arm_position_indices_cache = resolved
+        return resolved
+
+    def _compute_inter_arm_position_loss(
+        self,
+        predicted_actions: Tensor,
+        target_actions: Tensor,
+        action_mask: Tensor | None,
+    ) -> tuple[Tensor | None, Tensor | None]:
+        if self.config.loss_weight_inter_arm_position <= 0:
+            return None, None
+
+        indices = self._resolve_inter_arm_position_indices(predicted_actions.shape[-1])
+        if indices is None:
+            return None, None
+
+        left_indices, right_indices = indices
+        pred_left = predicted_actions[..., list(left_indices)]
+        pred_right = predicted_actions[..., list(right_indices)]
+        target_left = target_actions[..., list(left_indices)]
+        target_right = target_actions[..., list(right_indices)]
+
+        pred_span = pred_right - pred_left
+        target_span = target_right - target_left
+        losses = F.mse_loss(pred_span, target_span, reduction="none")
+
+        if action_mask is not None:
+            expanded_mask = action_mask
+            if expanded_mask.ndim == 2:
+                expanded_mask = expanded_mask[:, None, :]
+            left_valid = expanded_mask[..., list(left_indices)] > 0
+            right_valid = expanded_mask[..., list(right_indices)] > 0
+            pair_mask = (left_valid & right_valid).to(dtype=losses.dtype)
+            losses = losses * pair_mask
+            per_sample_denom = pair_mask.sum(dim=(1, 2)).clamp_min(1.0)
+            per_sample_loss = losses.sum(dim=(1, 2)) / per_sample_denom
+            scalar_loss = losses.sum() / pair_mask.sum().clamp_min(1.0)
+        else:
+            per_sample_loss = losses.mean(dim=(1, 2))
+            scalar_loss = losses.mean()
+
+        return per_sample_loss, scalar_loss
 
     def _infer_batch_size(self, batch: dict[str, Tensor]) -> int:
         for value in batch.values():
@@ -2263,11 +2358,14 @@ class PI05FullPolicy(PreTrainedPolicy):
             tactile_role_metadata=tactile_role_metadata,
         )
         losses = model_outputs["flow_losses"]
+        predicted_actions = model_outputs["predicted_actions"]
         subtask_ce_loss_per_sample = model_outputs["subtask_ce_loss_per_sample"]
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]
+        predicted_actions = predicted_actions[:, :, :original_action_dim]
+        target_actions = actions[:, :, :original_action_dim]
         expanded_action_mask = None
         if action_mask is not None:
             expanded_action_mask = action_mask[..., :original_action_dim]
@@ -2286,6 +2384,13 @@ class PI05FullPolicy(PreTrainedPolicy):
             "loss_per_dim": loss_per_dim.detach().cpu().numpy().tolist(),
             "subtask_ce_loss": subtask_ce_loss.item(),
         }
+        inter_arm_pos_loss_per_sample, inter_arm_pos_loss = self._compute_inter_arm_position_loss(
+            predicted_actions,
+            target_actions,
+            action_mask[..., :original_action_dim] if action_mask is not None else None,
+        )
+        if inter_arm_pos_loss is not None:
+            loss_dict["inter_arm_pos_loss"] = inter_arm_pos_loss.item()
         if expanded_action_mask is not None:
             loss_dict["action_mask_mean"] = expanded_action_mask.float().mean().item()
             loss_dict["action_mask_sum"] = expanded_action_mask.float().sum().item()
@@ -2301,6 +2406,11 @@ class PI05FullPolicy(PreTrainedPolicy):
                 self.config.loss_weight_flow * flow_per_sample_loss
                 + self.config.loss_weight_subtask_ce * subtask_ce_loss_per_sample
             )
+            if inter_arm_pos_loss_per_sample is not None:
+                per_sample_loss = (
+                    per_sample_loss
+                    + self.config.loss_weight_inter_arm_position * inter_arm_pos_loss_per_sample
+                )
             loss_dict["flow_loss"] = flow_per_sample_loss.mean().item()
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
@@ -2326,6 +2436,8 @@ class PI05FullPolicy(PreTrainedPolicy):
             else:
                 flow_loss = losses.mean()
             loss = self.config.loss_weight_flow * flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss
+            if inter_arm_pos_loss is not None:
+                loss = loss + self.config.loss_weight_inter_arm_position * inter_arm_pos_loss
             loss_dict["flow_loss"] = flow_loss.item()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict

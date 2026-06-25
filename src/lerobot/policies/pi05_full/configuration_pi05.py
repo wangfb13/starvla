@@ -140,6 +140,7 @@ class PI05FullConfig(PreTrainedConfig):
     reset_action_expert_after_pretrained_load: bool = False
     loss_weight_flow: float = 1.0
     loss_weight_subtask_ce: float = 1.0
+    loss_weight_inter_arm_position: float = 0.0
 
     # Optimizer settings: see openpi `AdamW`
     optimizer_lr: float = 2.5e-5  # see openpi `CosineDecaySchedule: peak_lr`
@@ -190,6 +191,8 @@ class PI05FullConfig(PreTrainedConfig):
             raise ValueError("loss_weight_flow must be non-negative.")
         if self.loss_weight_subtask_ce < 0:
             raise ValueError("loss_weight_subtask_ce must be non-negative.")
+        if self.loss_weight_inter_arm_position < 0:
+            raise ValueError("loss_weight_inter_arm_position must be non-negative.")
         if self.max_decoding_steps <= 0:
             raise ValueError("max_decoding_steps must be positive.")
         if self.temperature < 0:
