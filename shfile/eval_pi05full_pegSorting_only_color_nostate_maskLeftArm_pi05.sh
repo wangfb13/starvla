@@ -51,4 +51,7 @@ python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
   --policy.path="${POLICY_PATH}" \
   --policy.device=cuda \
   --policy.use_amp=true \
+  --inference_trace.enabled=true \
+  --inference_trace.store_io_summaries=true \
+  --inference_trace.store_image_keys=true \
   --interpolation_multiplier=1

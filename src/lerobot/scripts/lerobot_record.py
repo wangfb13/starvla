@@ -67,6 +67,7 @@ lerobot-record \
 ```
 """
 
+import json
 import logging
 import time
 from collections import deque
@@ -75,6 +76,7 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import numpy as np
 import torch
 
 from lerobot.cameras import (  # noqa: F401
@@ -250,6 +252,109 @@ class ManualRelativeLineTestConfig:
             raise ValueError(f"`manual_action_test.forward_steps` must be >= 1, got {self.forward_steps}.")
         if self.hold_steps < 0:
             raise ValueError(f"`manual_action_test.hold_steps` must be >= 0, got {self.hold_steps}.")
+
+
+@dataclass
+class InferenceTraceConfig:
+    # Enable per-inference trace dumps during policy-driven data collection.
+    enabled: bool = False
+    # Save compact summaries of observation/state and predicted action.
+    store_io_summaries: bool = True
+    # Save which visual input keys were present for each inference event.
+    store_image_keys: bool = True
+
+
+def _trace_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        if value.ndim == 0:
+            return value.item()
+        if value.numel() <= 64:
+            return value.detach().cpu().tolist()
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        if value.size <= 64:
+            return value.tolist()
+        return {"shape": list(value.shape), "dtype": str(value.dtype)}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _trace_value(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        if len(value) <= 16:
+            return [_trace_value(item) for item in value]
+        return {"len": len(value), "head": [_trace_value(item) for item in value[:8]]}
+    return str(type(value).__name__)
+
+
+def _is_visual_trace_value(value: Any) -> bool:
+    if isinstance(value, (torch.Tensor, np.ndarray)):
+        return value.ndim >= 3
+    return False
+
+
+def _build_policy_inference_trace(
+    *,
+    recorded_frame_index: int,
+    loop_timestamp_s: float,
+    inference_start_s: float,
+    inference_end_s: float,
+    raw_observation: dict[str, Any],
+    observation_frame: dict[str, Any],
+    action_values: Any,
+    policy: PreTrainedPolicy,
+    trace_config: InferenceTraceConfig,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "recorded_frame_index": recorded_frame_index,
+        "loop_timestamp_s": loop_timestamp_s,
+        "inference_start_s": inference_start_s,
+        "inference_end_s": inference_end_s,
+        "inference_latency_ms": (inference_end_s - inference_start_s) * 1000.0,
+        "policy_type": getattr(policy.config, "type", None),
+        "policy_name": getattr(policy, "name", None),
+    }
+
+    if trace_config.store_image_keys:
+        event["image_keys"] = sorted(
+            key for key, value in observation_frame.items() if _is_visual_trace_value(value)
+        )
+
+    if trace_config.store_io_summaries:
+        event["raw_observation"] = {
+            key: _trace_value(value)
+            for key, value in raw_observation.items()
+            if not _is_visual_trace_value(value)
+        }
+        event["model_inputs"] = {
+            key: _trace_value(value)
+            for key, value in observation_frame.items()
+            if not _is_visual_trace_value(value)
+        }
+        event["policy_output"] = _trace_value(action_values)
+
+    return event
+
+
+def _save_inference_trace(
+    dataset: LeRobotDataset,
+    episode_index: int,
+    trace_events: list[dict[str, Any]],
+) -> Path:
+    trace_dir = dataset.root / "meta" / "inference_traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = trace_dir / f"episode-{episode_index:06d}.json"
+    payload = {
+        "dataset_repo_id": dataset.repo_id,
+        "episode_index": episode_index,
+        "fps": dataset.fps,
+        "video_keys": list(dataset.meta.video_keys),
+        "events": trace_events,
+    }
+    with trace_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return trace_path
 
 
 class ManualRelativeLineTestRunner:
@@ -608,6 +713,8 @@ class RecordConfig:
     # Optional manual trajectory test that bypasses model forward while keeping
     # the inference pre/post-processing and robot action conversion unchanged.
     manual_action_test: ManualRelativeLineTestConfig = field(default_factory=ManualRelativeLineTestConfig)
+    # Optional per-inference trace capture for later video annotation/debugging.
+    inference_trace: InferenceTraceConfig = field(default_factory=InferenceTraceConfig)
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -689,7 +796,8 @@ def record_loop(
     interpolator: ActionInterpolator | None = None,
     display_compressed_images: bool = False,
     manual_action_test_runner: ManualRelativeLineTestRunner | None = None,
-):
+    inference_trace: InferenceTraceConfig | None = None,
+) -> list[dict[str, Any]] | None:
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
 
@@ -735,10 +843,13 @@ def record_loop(
     control_interval = interpolator.get_control_interval(fps) if interpolator else 1 / fps
     # Pre-compute action key order outside the hot loop — it won't change mid-episode.
     action_keys = sorted(robot.action_features) if use_interpolation else []
+    trace_enabled = bool(inference_trace is not None and inference_trace.enabled and policy is not None and dataset is not None)
 
     no_action_count = 0
     timestamp = 0
     start_episode_t = time.perf_counter()
+    policy_trace_events: list[dict[str, Any]] = []
+    recorded_policy_frame_index = 0
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -767,6 +878,7 @@ def record_loop(
                 ran_inference = False
 
                 if interpolator.needs_new_action():
+                    inference_start_t = time.perf_counter()
                     action_values = predict_action(
                         observation=observation_frame,
                         policy=policy,
@@ -781,6 +893,21 @@ def record_loop(
                         if manual_action_test_runner is not None
                         else None,
                     )
+                    inference_end_t = time.perf_counter()
+                    if trace_enabled:
+                        policy_trace_events.append(
+                            _build_policy_inference_trace(
+                                recorded_frame_index=recorded_policy_frame_index,
+                                loop_timestamp_s=inference_end_t - start_episode_t,
+                                inference_start_s=inference_start_t - start_episode_t,
+                                inference_end_s=inference_end_t - start_episode_t,
+                                raw_observation=obs_processed,
+                                observation_frame=observation_frame,
+                                action_values=action_values,
+                                policy=policy,
+                                trace_config=inference_trace,
+                            )
+                        )
                     act_processed_policy = make_robot_action(action_values, dataset.features)
                     robot_action_to_send = robot_action_processor((act_processed_policy, obs))
                     if manual_action_test_runner is not None:
@@ -801,6 +928,7 @@ def record_loop(
 
                 is_record_frame = ran_inference
             else:
+                inference_start_t = time.perf_counter()
                 action_values = predict_action(
                     observation=observation_frame,
                     policy=policy,
@@ -815,6 +943,21 @@ def record_loop(
                     if manual_action_test_runner is not None
                     else None,
                 )
+                inference_end_t = time.perf_counter()
+                if trace_enabled:
+                    policy_trace_events.append(
+                        _build_policy_inference_trace(
+                            recorded_frame_index=recorded_policy_frame_index,
+                            loop_timestamp_s=inference_end_t - start_episode_t,
+                            inference_start_s=inference_start_t - start_episode_t,
+                            inference_end_s=inference_end_t - start_episode_t,
+                            raw_observation=obs_processed,
+                            observation_frame=observation_frame,
+                            action_values=action_values,
+                            policy=policy,
+                            trace_config=inference_trace,
+                        )
+                    )
                 act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
                 # Applies a pipeline to the action, default is IdentityProcessor
                 robot_action_to_send = robot_action_processor((act_processed_policy, obs))
@@ -864,6 +1007,7 @@ def record_loop(
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
+            recorded_policy_frame_index += 1
 
         if display_data:
             log_rerun_data(
@@ -881,6 +1025,8 @@ def record_loop(
         precise_sleep(max(sleep_time_s, 0.0))
 
         timestamp = time.perf_counter() - start_episode_t
+
+    return policy_trace_events or None
 
 
 @parser.wrap()
@@ -1008,7 +1154,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-                record_loop(
+                episode_trace = record_loop(
                     robot=robot,
                     events=events,
                     fps=cfg.dataset.fps,
@@ -1026,6 +1172,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     interpolator=interpolator,
                     display_compressed_images=display_compressed_images,
                     manual_action_test_runner=manual_action_test_runner,
+                    inference_trace=cfg.inference_trace,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -1046,6 +1193,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        inference_trace=cfg.inference_trace,
                     )
 
                 if events["rerecord_episode"]:
@@ -1056,6 +1204,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     continue
 
                 dataset.save_episode()
+                if cfg.inference_trace.enabled and episode_trace:
+                    trace_path = _save_inference_trace(dataset, dataset.num_episodes - 1, episode_trace)
+                    logging.info("Saved inference trace to %s", trace_path)
                 recorded_episodes += 1
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
