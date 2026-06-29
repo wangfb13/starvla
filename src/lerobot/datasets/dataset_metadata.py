@@ -723,6 +723,9 @@ class LeRobotDatasetMetadata:
         self.info["total_frames"] += episode_length
         self.info["total_tasks"] = len(self.tasks)
         self.info["splits"] = {"train": f"0:{self.info['total_episodes']}"}
+        # Keep the in-memory storage view in sync so resumed episode numbering
+        # advances correctly within the same recording process.
+        self.storage_info = deepcopy(self.info)
 
         write_info(self.info, self.root)
 
