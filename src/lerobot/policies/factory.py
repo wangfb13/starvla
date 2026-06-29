@@ -84,6 +84,32 @@ def _reconnect_relative_absolute_steps(
             step.relative_step = relative_step
 
 
+def _get_saved_processor_step_keys(pretrained_path: str, config_filename: str) -> set[str]:
+    """Inspect a saved processor config and return the step keys it defines."""
+    loaded_config, _ = PolicyProcessorPipeline._load_config(  # type: ignore[attr-defined]
+        model_id=str(pretrained_path),
+        config_filename=config_filename,
+        hub_download_kwargs={
+            "force_download": False,
+            "resume_download": None,
+            "proxies": None,
+            "token": None,
+            "cache_dir": None,
+            "local_files_only": False,
+            "revision": None,
+        },
+    )
+
+    step_keys: set[str] = set()
+    for step_config in loaded_config.get("steps", []):
+        if isinstance(step_config, dict):
+            step_key = step_config.get("registry_name") or step_config.get("class_name")
+            if isinstance(step_key, str):
+                step_keys.add(step_key)
+
+    return step_keys
+
+
 def get_policy_class(name: str) -> type[PreTrainedPolicy]:
     """
     Retrieves a policy class by its registered name.
@@ -280,9 +306,30 @@ def make_pre_post_processors(
     """
     if pretrained_path:
         preprocessor_overrides = dict(kwargs.get("preprocessor_overrides", {}) or {})
+        preprocessor_config_filename = kwargs.get(
+            "preprocessor_config_filename", f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json"
+        )
+
+        if isinstance(policy_cfg, PI05FullConfig):
+            saved_preprocessor_step_keys = _get_saved_processor_step_keys(
+                pretrained_path=pretrained_path,
+                config_filename=preprocessor_config_filename,
+            )
+            has_legacy_pi05_prompt_step = (
+                "pi05_prepare_state_tokenizer_processor_step" in saved_preprocessor_step_keys
+                and "pi05_full_prepare_state_tokenizer_processor_step" not in saved_preprocessor_step_keys
+            )
+            if has_legacy_pi05_prompt_step:
+                logging.warning(
+                    "Loaded pretrained processor config from '%s' uses legacy "
+                    "'pi05_prepare_state_tokenizer_processor_step'. Rebuilding PI05-full "
+                    "processors from the current policy config while keeping pretrained model weights.",
+                    pretrained_path,
+                )
+                pretrained_path = None
 
         # TODO(Steven): Temporary patch, implement correctly the processors for Gr00t
-        if isinstance(policy_cfg, GrootConfig):
+        if pretrained_path and isinstance(policy_cfg, GrootConfig):
             # GROOT handles normalization in groot_pack_inputs_v3 step
             # Need to override both stats AND normalize_min_max since saved config might be empty
             preprocessor_overrides = {}
@@ -302,12 +349,12 @@ def make_pre_post_processors(
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
 
-        if isinstance(policy_cfg, PI05Config):
+        if pretrained_path and isinstance(policy_cfg, PI05Config):
             pi05_prompt_overrides = preprocessor_overrides.setdefault(
                 "pi05_prepare_state_tokenizer_processor_step", {}
             )
             pi05_prompt_overrides["use_state_input"] = getattr(policy_cfg, "use_state_input", True)
-        elif isinstance(policy_cfg, PI05FullConfig):
+        elif pretrained_path and isinstance(policy_cfg, PI05FullConfig):
             pi05_full_prompt_overrides = preprocessor_overrides.setdefault(
                 "pi05_full_prepare_state_tokenizer_processor_step", {}
             )
@@ -317,7 +364,9 @@ def make_pre_post_processors(
             )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
 
-        if isinstance(policy_cfg, PI05Config) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
+        if pretrained_path and isinstance(policy_cfg, PI05Config) and getattr(
+            policy_cfg, "canonicalize_bimanual_rot6d", False
+        ):
             # Older saved PI0.5 preprocessors may omit canonical source feature names.
             # Rehydrate them from the policy config so local datasets can still be canonicalized correctly.
             pi05_canonical_overrides = preprocessor_overrides.setdefault(
@@ -341,7 +390,9 @@ def make_pre_post_processors(
                 getattr(policy_cfg, "state_mask_observation_key", "observation.state_mask"),
             )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
-        elif isinstance(policy_cfg, PI05FullConfig) and getattr(policy_cfg, "canonicalize_bimanual_rot6d", False):
+        elif pretrained_path and isinstance(policy_cfg, PI05FullConfig) and getattr(
+            policy_cfg, "canonicalize_bimanual_rot6d", False
+        ):
             pi05_full_canonical_overrides = preprocessor_overrides.setdefault(
                 "pi05_full_canonicalize_bimanual_rot6d", {}
             )
@@ -364,26 +415,25 @@ def make_pre_post_processors(
             )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
 
-        preprocessor = PolicyProcessorPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_path,
-            config_filename=kwargs.get(
-                "preprocessor_config_filename", f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json"
-            ),
-            overrides=kwargs.get("preprocessor_overrides", {}),
-            to_transition=batch_to_transition,
-            to_output=transition_to_batch,
-        )
-        postprocessor = PolicyProcessorPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_path,
-            config_filename=kwargs.get(
-                "postprocessor_config_filename", f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json"
-            ),
-            overrides=kwargs.get("postprocessor_overrides", {}),
-            to_transition=policy_action_to_transition,
-            to_output=transition_to_policy_action,
-        )
-        _reconnect_relative_absolute_steps(preprocessor, postprocessor)
-        return preprocessor, postprocessor
+        if pretrained_path:
+            preprocessor = PolicyProcessorPipeline.from_pretrained(
+                pretrained_model_name_or_path=pretrained_path,
+                config_filename=preprocessor_config_filename,
+                overrides=kwargs.get("preprocessor_overrides", {}),
+                to_transition=batch_to_transition,
+                to_output=transition_to_batch,
+            )
+            postprocessor = PolicyProcessorPipeline.from_pretrained(
+                pretrained_model_name_or_path=pretrained_path,
+                config_filename=kwargs.get(
+                    "postprocessor_config_filename", f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json"
+                ),
+                overrides=kwargs.get("postprocessor_overrides", {}),
+                to_transition=policy_action_to_transition,
+                to_output=transition_to_policy_action,
+            )
+            _reconnect_relative_absolute_steps(preprocessor, postprocessor)
+            return preprocessor, postprocessor
 
     # Create a new processor based on policy type
     if isinstance(policy_cfg, TDMPCConfig):

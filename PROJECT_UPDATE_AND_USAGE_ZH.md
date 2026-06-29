@@ -233,6 +233,8 @@ RELATIVE_EXCLUDE_JOINTS='["gripper"]'
 
 同时，`factory.py` 中加载 pretrained processor 的 override key 也已同步切换到这组 `pi05_full_*` 名字，避免和原 `pi05` 互相覆盖。
 
+另外又补了一层向后兼容：如果 `pi05_full` 训练继续复用旧的 `pi05_base` pretrained directory，而其中保存的 `policy_preprocessor.json` 仍然使用老 step 名 `pi05_prepare_state_tokenizer_processor_step`，当前实现不会再强行加载这套 legacy processor。`factory.py` 会先检查已保存的 processor step keys；一旦发现这是旧 `pi05` processor，就保留 pretrained 模型权重加载，但改为按当前 `pi05_full` config 重新构建 pre/post processor。这样 `use_relative_actions=false` 的 absolute pose 训练也能顺利启动，不会再因为 override key 和 saved processor step name 不匹配而在初始化阶段报 `KeyError`。
+
 当前测试也已经从最小注册测试扩展为覆盖 `pi05_full user_prompt/subtask` 逻辑的回归测试：
 
 - `tests/policies/pi0_pi05/test_pi05_full.py`
