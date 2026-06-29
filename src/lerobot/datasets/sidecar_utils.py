@@ -20,7 +20,7 @@ from lerobot.utils.constants import ACTION, OBS_ACTION_MASK, OBS_STATE, OBS_STAT
 LOGGER = logging.getLogger(__name__)
 
 REAL_ROBOT_TYPES = {"spark3_pose_gripper"}
-UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper"}
+UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper", "dual_ugripper_v2_5"}
 
 _VECTOR_ALIAS_KEYS = {
     OBS_STATE_MASK: "state_mask",

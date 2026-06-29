@@ -1648,6 +1648,7 @@ class PI05FullPolicy(PreTrainedPolicy):
         self._cached_subtask_prompt_masks: Tensor | None = None
         self._last_subtask_time: float | None = None
         self._inter_arm_position_indices_cache: tuple[tuple[int, int, int], tuple[int, int, int]] | None | bool = None
+        self._arm_pose_indices_cache: tuple[tuple[int, ...], tuple[int, ...]] | None | bool = None
 
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
@@ -1717,6 +1718,45 @@ class PI05FullPolicy(PreTrainedPolicy):
         self._inter_arm_position_indices_cache = resolved
         return resolved
 
+    @staticmethod
+    def _is_named_arm_pose_feature(name: str, arm: str) -> bool:
+        lowered = str(name).lower()
+        if "gripper" in lowered:
+            return False
+        arm_aliases = {
+            "left": ("left_", "main_left_", "left_arm_pose.", "left_pose."),
+            "right": ("right_", "main_right_", "right_arm_pose.", "right_pose."),
+        }
+        return any(alias in lowered for alias in arm_aliases[arm])
+
+    def _resolve_arm_pose_indices(self, action_dim: int) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+        cached = getattr(self, "_arm_pose_indices_cache", None)
+        if cached is False:
+            return None
+        if isinstance(cached, tuple):
+            return cached
+
+        action_names = getattr(self.config, "action_feature_names", None)
+        if action_names is not None:
+            left_indices = tuple(
+                idx for idx, name in enumerate(action_names) if self._is_named_arm_pose_feature(name, "left")
+            )
+            right_indices = tuple(
+                idx for idx, name in enumerate(action_names) if self._is_named_arm_pose_feature(name, "right")
+            )
+            if left_indices and right_indices:
+                resolved = (left_indices, right_indices)
+                self._arm_pose_indices_cache = resolved
+                return resolved
+
+        if action_dim >= 19:
+            resolved = (tuple(range(0, 9)), tuple(range(10, 19)))
+            self._arm_pose_indices_cache = resolved
+            return resolved
+
+        self._arm_pose_indices_cache = False
+        return None
+
     def _compute_inter_arm_position_loss(
         self,
         predicted_actions: Tensor,
@@ -1756,6 +1796,103 @@ class PI05FullPolicy(PreTrainedPolicy):
             scalar_loss = losses.mean()
 
         return per_sample_loss, scalar_loss
+
+    @staticmethod
+    def _masked_mean_last_dim(values: Tensor, mask: Tensor | None) -> Tensor:
+        if mask is None:
+            return values.mean(dim=-1)
+        denom = mask.sum(dim=-1).clamp_min(1.0)
+        return (values * mask).sum(dim=-1) / denom
+
+    @staticmethod
+    def _expand_action_mask_over_time(mask: Tensor | None, target_time_dim: int) -> Tensor | None:
+        if mask is None:
+            return None
+        if mask.ndim == 2:
+            mask = mask[:, None, :]
+        if mask.shape[1] == 1 and target_time_dim != 1:
+            mask = mask.expand(-1, target_time_dim, -1)
+        elif mask.shape[1] != target_time_dim:
+            raise ValueError(
+                "Action mask time dimension does not match predicted action chunk length: "
+                f"mask.shape={tuple(mask.shape)} target_time_dim={target_time_dim}"
+            )
+        return mask
+
+    def _compute_idle_arm_losses(
+        self,
+        predicted_actions: Tensor,
+        target_actions: Tensor,
+        action_mask: Tensor | None,
+    ) -> tuple[Tensor | None, Tensor | None, Tensor | None, Tensor | None]:
+        if self.config.loss_weight_idle_arm <= 0 and self.config.loss_weight_idle_smoothness <= 0:
+            return None, None, None, None
+
+        indices = self._resolve_arm_pose_indices(predicted_actions.shape[-1])
+        if indices is None:
+            return None, None, None, None
+
+        expanded_mask = None
+        if action_mask is not None:
+            expanded_mask = self._expand_action_mask_over_time(action_mask, predicted_actions.shape[1])
+            expanded_mask = expanded_mask.to(device=predicted_actions.device, dtype=predicted_actions.dtype)
+
+        idle_weighted_losses: list[Tensor] = []
+        idle_sample_counts: list[Tensor] = []
+        smooth_weighted_losses: list[Tensor] = []
+        smooth_sample_counts: list[Tensor] = []
+
+        for arm_indices in indices:
+            pred_arm = predicted_actions[..., list(arm_indices)]
+            target_arm = target_actions[..., list(arm_indices)]
+            arm_mask = expanded_mask[..., list(arm_indices)] if expanded_mask is not None else None
+
+            activity = self._masked_mean_last_dim(target_arm.abs(), arm_mask)
+            idle_step_mask = (activity < self.config.idle_arm_threshold).to(dtype=predicted_actions.dtype)
+
+            pose_errors = F.mse_loss(pred_arm, target_arm, reduction="none")
+            pose_step_losses = self._masked_mean_last_dim(pose_errors, arm_mask)
+            idle_weighted_losses.append((pose_step_losses * idle_step_mask).sum(dim=1))
+            idle_sample_counts.append(idle_step_mask.sum(dim=1))
+
+            if pred_arm.shape[1] > 1:
+                pred_step_delta = pred_arm[:, 1:, :] - pred_arm[:, :-1, :]
+                if arm_mask is not None:
+                    delta_mask = arm_mask[:, 1:, :] * arm_mask[:, :-1, :]
+                else:
+                    delta_mask = None
+                smooth_step_losses = self._masked_mean_last_dim(pred_step_delta.pow(2), delta_mask)
+                idle_pair_mask = idle_step_mask[:, 1:] * idle_step_mask[:, :-1]
+                smooth_weighted_losses.append((smooth_step_losses * idle_pair_mask).sum(dim=1))
+                smooth_sample_counts.append(idle_pair_mask.sum(dim=1))
+
+        idle_loss_per_sample = None
+        idle_loss = None
+        if idle_weighted_losses:
+            idle_total = torch.stack(idle_weighted_losses, dim=0).sum(dim=0)
+            idle_counts = torch.stack(idle_sample_counts, dim=0).sum(dim=0)
+            idle_loss_per_sample = idle_total / idle_counts.clamp_min(1.0)
+            valid_idle_samples = idle_counts > 0
+            idle_loss = (
+                idle_total[valid_idle_samples].sum() / idle_counts[valid_idle_samples].sum().clamp_min(1.0)
+                if torch.any(valid_idle_samples)
+                else torch.zeros((), device=predicted_actions.device, dtype=predicted_actions.dtype)
+            )
+
+        idle_smoothness_per_sample = None
+        idle_smoothness_loss = None
+        if smooth_weighted_losses:
+            smooth_total = torch.stack(smooth_weighted_losses, dim=0).sum(dim=0)
+            smooth_counts = torch.stack(smooth_sample_counts, dim=0).sum(dim=0)
+            idle_smoothness_per_sample = smooth_total / smooth_counts.clamp_min(1.0)
+            valid_smooth_samples = smooth_counts > 0
+            idle_smoothness_loss = (
+                smooth_total[valid_smooth_samples].sum() / smooth_counts[valid_smooth_samples].sum().clamp_min(1.0)
+                if torch.any(valid_smooth_samples)
+                else torch.zeros((), device=predicted_actions.device, dtype=predicted_actions.dtype)
+            )
+
+        return idle_loss_per_sample, idle_loss, idle_smoothness_per_sample, idle_smoothness_loss
 
     def _infer_batch_size(self, batch: dict[str, Tensor]) -> int:
         for value in batch.values():
@@ -2389,8 +2526,19 @@ class PI05FullPolicy(PreTrainedPolicy):
             target_actions,
             action_mask[..., :original_action_dim] if action_mask is not None else None,
         )
+        idle_arm_loss_per_sample, idle_arm_loss, idle_smoothness_per_sample, idle_smoothness_loss = (
+            self._compute_idle_arm_losses(
+                predicted_actions,
+                target_actions,
+                action_mask[..., :original_action_dim] if action_mask is not None else None,
+            )
+        )
         if inter_arm_pos_loss is not None:
             loss_dict["inter_arm_pos_loss"] = inter_arm_pos_loss.item()
+        if idle_arm_loss is not None:
+            loss_dict["idle_arm_loss"] = idle_arm_loss.item()
+        if idle_smoothness_loss is not None:
+            loss_dict["idle_smoothness_loss"] = idle_smoothness_loss.item()
         if expanded_action_mask is not None:
             loss_dict["action_mask_mean"] = expanded_action_mask.float().mean().item()
             loss_dict["action_mask_sum"] = expanded_action_mask.float().sum().item()
@@ -2410,6 +2558,13 @@ class PI05FullPolicy(PreTrainedPolicy):
                 per_sample_loss = (
                     per_sample_loss
                     + self.config.loss_weight_inter_arm_position * inter_arm_pos_loss_per_sample
+                )
+            if idle_arm_loss_per_sample is not None:
+                per_sample_loss = per_sample_loss + self.config.loss_weight_idle_arm * idle_arm_loss_per_sample
+            if idle_smoothness_per_sample is not None:
+                per_sample_loss = (
+                    per_sample_loss
+                    + self.config.loss_weight_idle_smoothness * idle_smoothness_per_sample
                 )
             loss_dict["flow_loss"] = flow_per_sample_loss.mean().item()
             loss_dict["loss"] = per_sample_loss.mean().item()
@@ -2438,6 +2593,10 @@ class PI05FullPolicy(PreTrainedPolicy):
             loss = self.config.loss_weight_flow * flow_loss + self.config.loss_weight_subtask_ce * subtask_ce_loss
             if inter_arm_pos_loss is not None:
                 loss = loss + self.config.loss_weight_inter_arm_position * inter_arm_pos_loss
+            if idle_arm_loss is not None:
+                loss = loss + self.config.loss_weight_idle_arm * idle_arm_loss
+            if idle_smoothness_loss is not None:
+                loss = loss + self.config.loss_weight_idle_smoothness * idle_smoothness_loss
             loss_dict["flow_loss"] = flow_loss.item()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict

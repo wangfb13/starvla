@@ -39,15 +39,34 @@ LOGGER = logging.getLogger("build_pi05_canonical_sidecar")
 
 SENTINEL = 9930.0
 JOIN_KEYS = ["index", "episode_index", "frame_index"]
-POSE_NAMES = {
-    "left": ["left_x", "left_y", "left_z", "left_qx", "left_qy", "left_qz", "left_qw"],
-    "right": ["right_x", "right_y", "right_z", "right_qx", "right_qy", "right_qz", "right_qw"],
+POSE_NAME_CANDIDATES = {
+    "left": [
+        ["left_x"],
+        ["left_y"],
+        ["left_z"],
+        ["left_qx", "left_Quat_X"],
+        ["left_qy", "left_Quat_Y"],
+        ["left_qz", "left_Quat_Z"],
+        ["left_qw", "left_Quat_W"],
+    ],
+    "right": [
+        ["right_x"],
+        ["right_y"],
+        ["right_z"],
+        ["right_qx", "right_Quat_X"],
+        ["right_qy", "right_Quat_Y"],
+        ["right_qz", "right_Quat_Z"],
+        ["right_qw", "right_Quat_W"],
+    ],
 }
-GRIPPER_NAMES = {"left": "gripper_left", "right": "gripper_right"}
+GRIPPER_NAME_CANDIDATES = {
+    "left": [["gripper_left", "left_Position_Rad", "left_gripper", "main_gripper_left"]],
+    "right": [["gripper_right", "right_Position_Rad", "right_gripper", "main_gripper_right"]],
+}
 SUBTASK_EPISODE_PATTERN = re.compile(r"(?:^|_)ep(\d+)(?:_|$)")
 DEFAULT_SCHEMA_NAME = "pi05_canonical_bimanual_rot6d_v1"
 REAL_ROBOT_TYPES = {"spark3_pose_gripper"}
-UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper"}
+UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper", "dual_ugripper_v2_5"}
 UMI_GRIPPER_RAW_MIN = -0.436
 UMI_GRIPPER_RAW_MAX = 0.0
 UMI_GRIPPER_NORMALIZATION_DENOMINATOR = -0.436
@@ -253,6 +272,32 @@ def take_columns(
     return values, valid
 
 
+def take_columns_with_aliases(
+    matrix: np.ndarray,
+    mapping: dict[str, int],
+    candidate_groups: list[list[str]],
+    *,
+    missing_value: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    values = np.zeros((matrix.shape[0], len(candidate_groups)), dtype=np.float32)
+    valid = np.zeros((matrix.shape[0], len(candidate_groups)), dtype=bool)
+    lowered_mapping = {name.lower(): idx for name, idx in mapping.items()}
+    for out_idx, candidates in enumerate(candidate_groups):
+        source_idx = None
+        for candidate in candidates:
+            source_idx = lowered_mapping.get(candidate.lower())
+            if source_idx is not None:
+                break
+        if source_idx is None:
+            continue
+        column = matrix[:, source_idx].astype(np.float32)
+        use = np.isfinite(column) & ~np.isclose(column, missing_value)
+        if np.any(use):
+            values[use, out_idx] = column[use]
+        valid[:, out_idx] = use
+    return values, valid
+
+
 def normalize_umi_gripper(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
     normalized = np.asarray(values, dtype=np.float32).copy()
     use = np.asarray(valid, dtype=bool)
@@ -395,28 +440,28 @@ def build_state_action_from_raw(
     arm_anchor_counts: dict[str, int] = {}
 
     for arm in ARM_NAMES:
-        pose_state, pose_state_valid = take_columns(
+        pose_state, pose_state_valid = take_columns_with_aliases(
             state_matrix,
             state_index,
-            POSE_NAMES[arm],
+            POSE_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
-        grip_state, grip_state_valid = take_columns(
+        grip_state, grip_state_valid = take_columns_with_aliases(
             state_matrix,
             state_index,
-            [GRIPPER_NAMES[arm]],
+            GRIPPER_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
-        pose_action, pose_action_valid = take_columns(
+        pose_action, pose_action_valid = take_columns_with_aliases(
             action_matrix,
             action_index,
-            POSE_NAMES[arm],
+            POSE_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
-        grip_action, grip_action_valid = take_columns(
+        grip_action, grip_action_valid = take_columns_with_aliases(
             action_matrix,
             action_index,
-            [GRIPPER_NAMES[arm]],
+            GRIPPER_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
 
@@ -484,6 +529,15 @@ def build_state_action_from_raw(
     )
     arm_present_mask = np.concatenate(state_present_bits, axis=1).astype(np.float32)
     state_present = (arm_present_mask.max(axis=1) > 0).astype(np.float32)
+
+    if arm_present_mask.sum() == 0 and action_valid_mask.sum() == 0:
+        raise ValueError(
+            "Canonical sidecar conversion found no valid arm state/action dimensions. "
+            f"robot_type={info.get('robot_type')!r}, "
+            f"state_names={source_state_names}, "
+            f"action_names={source_action_names}. "
+            "Check raw feature name aliases in build_pi05_canonical_sidecar.py."
+        )
 
     return {
         OBS_STATE: canonical_state,

@@ -196,7 +196,7 @@ python3 scripts/build_pi05_real_state_as_action_sidecar.py \
 ```bash
 python3 scripts/build_pi05_real_state_as_action_state_gripper_sidecar.py \
   --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_R7_norotation_roots.txt \
-  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_R7norotation60 \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_R7Norotation120_stateGripper \
   --real-mask-arm none \
   --overwrite
 
@@ -216,8 +216,8 @@ python3 scripts/build_pi05_real_state_as_action_sidecar.py \
 
 
 python3 scripts/build_pi05_real_state_as_action_state_gripper_sidecar.py \
-  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_R7_undist_roots.txt \
-  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_R7_stateGripperUndist \
+  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_R8_expert_roots.txt \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_sparky_stateAsAction_R8_expert_stateGripper \
   --real-mask-arm none \
   --overwrite
 ```

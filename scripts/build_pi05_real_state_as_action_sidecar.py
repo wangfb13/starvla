@@ -16,14 +16,14 @@ from tqdm import tqdm
 
 from build_pi05_canonical_sidecar import (
     ACTION,
+    ARM_NAMES,
     CANONICAL_ACTION_DIM,
     CANONICAL_STATE_DIM,
-    GRIPPER_NAMES,
+    GRIPPER_NAME_CANDIDATES,
     JOIN_KEYS,
     OBS_STATE,
-    POSE_NAMES,
+    POSE_NAME_CANDIDATES,
     REAL_ROBOT_TYPES,
-    ARM_NAMES,
     build_arm_absolute_targets,
     build_pose_absolute_rot6d,
     build_previous_action,
@@ -40,7 +40,7 @@ from build_pi05_canonical_sidecar import (
     resolve_base_sidecar,
     resolve_task_text,
     serialize_dict,
-    take_columns,
+    take_columns_with_aliases,
     to_list_column,
     write_json,
 )
@@ -161,16 +161,16 @@ def build_state_action_from_state_only(
     arm_anchor_counts = {arm: 0 for arm in ARM_NAMES}
 
     for arm in ARM_NAMES:
-        pose_state, pose_state_valid = take_columns(
+        pose_state, pose_state_valid = take_columns_with_aliases(
             state_matrix,
             state_index,
-            POSE_NAMES[arm],
+            POSE_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
-        grip_state, grip_state_valid = take_columns(
+        grip_state, grip_state_valid = take_columns_with_aliases(
             state_matrix,
             state_index,
-            [GRIPPER_NAMES[arm]],
+            GRIPPER_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
 
@@ -182,10 +182,10 @@ def build_state_action_from_state_only(
         state_arm_mask = np.concatenate([compact_state_pose_valid, grip_state_valid], axis=1).astype(np.float32)
         state_present = (compact_state_pose_valid.all(axis=1) | grip_state_valid.all(axis=1)).astype(np.float32)
 
-        grip_action, grip_action_valid = take_columns(
+        grip_action, grip_action_valid = take_columns_with_aliases(
             action_matrix,
             action_index,
-            [GRIPPER_NAMES[arm]],
+            GRIPPER_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
 

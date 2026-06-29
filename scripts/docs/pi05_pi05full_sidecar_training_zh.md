@@ -385,6 +385,13 @@ cd /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5
   --relative-action-keyframes 0:3,10:13 \
   --relative-exclude-joints "" \
   --overwrite
+
+
+python3 scripts/build_pi05_canonical_sidecar.py \
+  --dataset-roots-file /mnt/cpfs/projects/lerobot-v0.5.1-feat-sparky_x5/scripts/sparky_fruit_packing_R8_umi_roots.txt \
+  --output-root /mnt/cpfs/datasets/pi05_canonical_sidecars_fruit_packing_R8_umi \
+  --dataset-type auto \
+  --overwrite
 ```
 
 如果只处理单个数据集，可以用：
