@@ -18,6 +18,7 @@
 
 
 import logging
+import time
 import traceback
 from collections import deque
 from collections.abc import Callable
@@ -221,6 +222,32 @@ def _get_processed_action_queue(policy: PreTrainedPolicy) -> deque[PolicyAction]
     return queue
 
 
+def _get_trace_raw_action_queue(policy: PreTrainedPolicy) -> deque[torch.Tensor]:
+    queue = getattr(policy, "_lerobot_trace_raw_action_queue", None)
+    if queue is None:
+        queue = deque(maxlen=max(1, int(getattr(policy.config, "n_action_steps", 1))))
+        setattr(policy, "_lerobot_trace_raw_action_queue", queue)
+    return queue
+
+
+def _get_policy_queue_size(policy: PreTrainedPolicy) -> int | None:
+    queue = getattr(policy, "_action_queue", None)
+    if queue is not None:
+        try:
+            return len(queue)
+        except TypeError:
+            return None
+
+    queue = getattr(policy, "_lerobot_processed_action_queue", None)
+    if queue is not None:
+        try:
+            return len(queue)
+        except TypeError:
+            return None
+
+    return None
+
+
 def _split_postprocessed_chunk(processed_chunk: PolicyAction) -> list[PolicyAction]:
     if not isinstance(processed_chunk, torch.Tensor):
         raise TypeError(
@@ -247,15 +274,22 @@ def _predict_action_with_shared_reference_chunk(
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
     robot_type: str | None,
+    return_trace: dict[str, Any] | None = None,
 ) -> PolicyAction:
     queue = _get_processed_action_queue(policy)
+    raw_queue = _get_trace_raw_action_queue(policy)
     if queue:
-        return queue.popleft()
+        action = queue.popleft()
+        raw_action = raw_queue.popleft() if raw_queue else None
+        if return_trace is not None and raw_action is not None:
+            return_trace["raw_policy_action_tensor"] = raw_action
+        return action
 
     raw_chunk = policy.predict_action_chunk(observation)[:, : policy.config.n_action_steps]
     processed_chunk = postprocessor(raw_chunk)
 
     for step_action in _split_postprocessed_chunk(processed_chunk):
+        raw_queue.append(step_action.detach().cpu().clone())
         queue.append(
             _maybe_convert_pi05_canonical_action_to_robot_action(
                 action=step_action,
@@ -270,7 +304,11 @@ def _predict_action_with_shared_reference_chunk(
     if not queue:
         raise RuntimeError("Policy returned an empty action chunk after shared-reference decoding.")
 
-    return queue.popleft()
+    action = queue.popleft()
+    raw_action = raw_queue.popleft() if raw_queue else None
+    if return_trace is not None and raw_action is not None:
+        return_trace["raw_policy_action_tensor"] = raw_action
+    return action
 
 
 def _decode_override_chunk_with_shared_reference(
@@ -282,13 +320,20 @@ def _decode_override_chunk_with_shared_reference(
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
     robot_type: str | None,
+    return_trace: dict[str, Any] | None = None,
 ) -> PolicyAction:
     queue = _get_processed_action_queue(policy)
+    raw_queue = _get_trace_raw_action_queue(policy)
     if queue:
-        return queue.popleft()
+        action = queue.popleft()
+        raw_action = raw_queue.popleft() if raw_queue else None
+        if return_trace is not None and raw_action is not None:
+            return_trace["raw_policy_action_tensor"] = raw_action
+        return action
 
     processed_chunk = postprocessor(raw_chunk)
     for step_action in _split_postprocessed_chunk(processed_chunk):
+        raw_queue.append(step_action.detach().cpu().clone())
         queue.append(
             _maybe_convert_pi05_canonical_action_to_robot_action(
                 action=step_action,
@@ -303,7 +348,11 @@ def _decode_override_chunk_with_shared_reference(
     if not queue:
         raise RuntimeError("Manual action override returned an empty action chunk after shared-reference decoding.")
 
-    return queue.popleft()
+    action = queue.popleft()
+    raw_action = raw_queue.popleft() if raw_queue else None
+    if return_trace is not None and raw_action is not None:
+        return_trace["raw_policy_action_tensor"] = raw_action
+    return action
 
 
 def predict_action(
@@ -317,6 +366,7 @@ def predict_action(
     robot_type: str | None = None,
     raw_observation: dict[str, Any] | None = None,
     action_override: Callable[[dict[str, Any]], PolicyAction] | None = None,
+    return_trace: dict[str, Any] | None = None,
 ):
     """
     Performs a single-step inference to predict a robot action from an observation.
@@ -347,11 +397,18 @@ def predict_action(
     raw_observation = copy(raw_observation) if raw_observation is not None else copy(observation)
     prepared_observation = None
     action_is_final = False
+    trace = return_trace if return_trace is not None else None
+    if trace is not None:
+        trace.clear()
+        trace["policy_queue_size_before"] = _get_policy_queue_size(policy)
+        trace["n_action_steps"] = int(getattr(policy.config, "n_action_steps", 1))
+
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
+        start_t = time.perf_counter()
         observation = prepare_observation_for_inference(observation, device, task, robot_type)
         if should_use_online_pi05_full_sidecar_adapter(
             policy_type=policy.name,
@@ -365,10 +422,30 @@ def predict_action(
             )
             _ensure_online_sidecar_batch_dims(observation, policy)
         prepared_observation = observation
+        if trace is not None:
+            trace["prepare_observation_ms"] = (time.perf_counter() - start_t) * 1000.0
+            if OBS_STATE in prepared_observation:
+                trace["prepared_model_input_state"] = prepared_observation[OBS_STATE].detach().cpu()
+            action_mask_key = getattr(policy.config, "action_mask_observation_key", OBS_ACTION_MASK)
+            state_mask_key = getattr(policy.config, "state_mask_observation_key", OBS_STATE_MASK)
+            if state_mask_key in prepared_observation:
+                trace["prepared_model_input_state_mask"] = prepared_observation[state_mask_key].detach().cpu()
+            if action_mask_key in prepared_observation:
+                trace["prepared_model_input_action_mask"] = prepared_observation[action_mask_key].detach().cpu()
+
+        start_t = time.perf_counter()
         observation = preprocessor(observation)
+        if trace is not None:
+            trace["preprocessor_ms"] = (time.perf_counter() - start_t) * 1000.0
+            if OBS_STATE in observation:
+                trace["preprocessed_model_input_state"] = observation[OBS_STATE].detach().cpu()
 
         # Compute the next action either from the policy or from a manual override
         # that mimics the raw model output format before post-processing.
+        queue_size_before_select = _get_policy_queue_size(policy)
+        if trace is not None:
+            trace["policy_queue_size_before_select"] = queue_size_before_select
+        start_t = time.perf_counter()
         if action_override is not None:
             action = action_override(prepared_observation)
             if _is_chunk_action_tensor(action):
@@ -380,9 +457,16 @@ def predict_action(
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                     robot_type=robot_type,
+                    return_trace=trace,
                 )
                 action_is_final = True
+                if trace is not None:
+                    trace["chunk_queue_refresh"] = True
+                    trace["chunk_decode_path"] = "manual_override_shared_reference"
         elif _should_decode_action_chunks_with_shared_reference(policy, action_override):
+            if trace is not None:
+                trace["chunk_queue_refresh"] = queue_size_before_select == 0
+                trace["chunk_decode_path"] = "shared_reference"
             action = _predict_action_with_shared_reference_chunk(
                 observation=observation,
                 raw_observation=raw_observation,
@@ -391,14 +475,27 @@ def predict_action(
                 preprocessor=preprocessor,
                 postprocessor=postprocessor,
                 robot_type=robot_type,
+                return_trace=trace,
             )
             action_is_final = True
         else:
+            if trace is not None:
+                trace["chunk_queue_refresh"] = queue_size_before_select == 0 if queue_size_before_select is not None else None
+                trace["chunk_decode_path"] = "policy_select_action"
             action = policy.select_action(observation)
+        if trace is not None:
+            trace["policy_select_ms"] = (time.perf_counter() - start_t) * 1000.0
+
         if not action_is_final:
+            start_t = time.perf_counter()
             action = postprocessor(action)
+            if trace is not None:
+                trace["postprocessor_ms"] = (time.perf_counter() - start_t) * 1000.0
+                if isinstance(action, torch.Tensor):
+                    trace["raw_policy_action_tensor"] = action.detach().cpu().clone()
 
     if not action_is_final:
+        start_t = time.perf_counter()
         action = _maybe_convert_pi05_canonical_action_to_robot_action(
             action=action,
             raw_observation=raw_observation,
@@ -406,6 +503,18 @@ def predict_action(
             policy=policy,
             preprocessor=preprocessor,
             robot_type=robot_type,
+        )
+        if trace is not None:
+            trace["action_convert_ms"] = (time.perf_counter() - start_t) * 1000.0
+
+    if trace is not None:
+        trace["policy_queue_size_after"] = _get_policy_queue_size(policy)
+        trace["predict_action_total_ms"] = (
+            trace.get("prepare_observation_ms", 0.0)
+            + trace.get("preprocessor_ms", 0.0)
+            + trace.get("policy_select_ms", 0.0)
+            + trace.get("postprocessor_ms", 0.0)
+            + trace.get("action_convert_ms", 0.0)
         )
 
     return action

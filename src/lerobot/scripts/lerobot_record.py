@@ -282,7 +282,7 @@ def _trace_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _trace_value(sub_value) for key, sub_value in value.items()}
     if isinstance(value, (list, tuple)):
-        if len(value) <= 16:
+        if len(value) <= 64:
             return [_trace_value(item) for item in value]
         return {"len": len(value), "head": [_trace_value(item) for item in value[:8]]}
     return str(type(value).__name__)
@@ -305,6 +305,8 @@ def _build_policy_inference_trace(
     action_values: Any,
     policy: PreTrainedPolicy,
     trace_config: InferenceTraceConfig,
+    inference_metrics: dict[str, Any] | None = None,
+    loop_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "recorded_frame_index": recorded_frame_index,
@@ -315,6 +317,15 @@ def _build_policy_inference_trace(
         "policy_type": getattr(policy.config, "type", None),
         "policy_name": getattr(policy, "name", None),
     }
+
+    if inference_metrics:
+        event["inference_metrics"] = {
+            key: _trace_value(value) for key, value in inference_metrics.items() if value is not None
+        }
+    if loop_metrics:
+        event["loop_metrics"] = {
+            key: _trace_value(value) for key, value in loop_metrics.items() if value is not None
+        }
 
     if trace_config.store_image_keys:
         event["image_keys"] = sorted(
@@ -852,13 +863,21 @@ def record_loop(
     recorded_policy_frame_index = 0
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
+        get_observation_time_ms = None
+        send_action_time_ms = None
+        dataset_add_frame_time_ms = None
+        sleep_requested_ms = None
+        sleep_actual_ms = None
+        inference_metrics: dict[str, Any] | None = None
 
         if events["exit_early"]:
             events["exit_early"] = False
             break
 
         # Get robot observation
+        get_observation_start_t = time.perf_counter()
         obs = robot.get_observation()
+        get_observation_time_ms = (time.perf_counter() - get_observation_start_t) * 1000.0
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
@@ -879,6 +898,7 @@ def record_loop(
 
                 if interpolator.needs_new_action():
                     inference_start_t = time.perf_counter()
+                    inference_metrics = {}
                     action_values = predict_action(
                         observation=observation_frame,
                         policy=policy,
@@ -892,22 +912,9 @@ def record_loop(
                         action_override=manual_action_test_runner
                         if manual_action_test_runner is not None
                         else None,
+                        return_trace=inference_metrics,
                     )
                     inference_end_t = time.perf_counter()
-                    if trace_enabled:
-                        policy_trace_events.append(
-                            _build_policy_inference_trace(
-                                recorded_frame_index=recorded_policy_frame_index,
-                                loop_timestamp_s=inference_end_t - start_episode_t,
-                                inference_start_s=inference_start_t - start_episode_t,
-                                inference_end_s=inference_end_t - start_episode_t,
-                                raw_observation=obs_processed,
-                                observation_frame=observation_frame,
-                                action_values=action_values,
-                                policy=policy,
-                                trace_config=inference_trace,
-                            )
-                        )
                     act_processed_policy = make_robot_action(action_values, dataset.features)
                     robot_action_to_send = robot_action_processor((act_processed_policy, obs))
                     if manual_action_test_runner is not None:
@@ -929,6 +936,7 @@ def record_loop(
                 is_record_frame = ran_inference
             else:
                 inference_start_t = time.perf_counter()
+                inference_metrics = {}
                 action_values = predict_action(
                     observation=observation_frame,
                     policy=policy,
@@ -942,22 +950,9 @@ def record_loop(
                     action_override=manual_action_test_runner
                     if manual_action_test_runner is not None
                     else None,
+                    return_trace=inference_metrics,
                 )
                 inference_end_t = time.perf_counter()
-                if trace_enabled:
-                    policy_trace_events.append(
-                        _build_policy_inference_trace(
-                            recorded_frame_index=recorded_policy_frame_index,
-                            loop_timestamp_s=inference_end_t - start_episode_t,
-                            inference_start_s=inference_start_t - start_episode_t,
-                            inference_end_s=inference_end_t - start_episode_t,
-                            raw_observation=obs_processed,
-                            observation_frame=observation_frame,
-                            action_values=action_values,
-                            policy=policy,
-                            trace_config=inference_trace,
-                        )
-                    )
                 act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
                 # Applies a pipeline to the action, default is IdentityProcessor
                 robot_action_to_send = robot_action_processor((act_processed_policy, obs))
@@ -1000,13 +995,38 @@ def record_loop(
         # i.e. the pre-send action representation produced by the policy/teleop path.
         # If robot-side conversion or clipping is introduced, the recorded dataset action
         # remains whatever was stored in `action_values`, not `_sent_action`.
+        send_action_start_t = time.perf_counter()
         _sent_action = robot.send_action(robot_action_to_send)
+        send_action_time_ms = (time.perf_counter() - send_action_start_t) * 1000.0
 
         # Write to dataset (only on real policy frames, not interpolated-only iterations)
         if dataset is not None and is_record_frame:
+            dataset_add_frame_start_t = time.perf_counter()
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
+            dataset_add_frame_time_ms = (time.perf_counter() - dataset_add_frame_start_t) * 1000.0
+            if trace_enabled and policy is not None and inference_metrics is not None:
+                loop_metrics = {
+                    "get_observation_ms": get_observation_time_ms,
+                    "send_action_ms": send_action_time_ms,
+                    "dataset_add_frame_ms": dataset_add_frame_time_ms,
+                }
+                policy_trace_events.append(
+                    _build_policy_inference_trace(
+                        recorded_frame_index=recorded_policy_frame_index,
+                        loop_timestamp_s=inference_end_t - start_episode_t,
+                        inference_start_s=inference_start_t - start_episode_t,
+                        inference_end_s=inference_end_t - start_episode_t,
+                        raw_observation=obs_processed,
+                        observation_frame=observation_frame,
+                        action_values=action_values,
+                        policy=policy,
+                        trace_config=inference_trace,
+                        inference_metrics=inference_metrics,
+                        loop_metrics=loop_metrics,
+                    )
+                )
             recorded_policy_frame_index += 1
 
         if display_data:
@@ -1022,7 +1042,23 @@ def record_loop(
                 f"Record loop is running slower ({1 / dt_s:.1f} Hz) than the target FPS ({fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
             )
 
+        sleep_requested_ms = max(sleep_time_s, 0.0) * 1000.0
+        sleep_start_t = time.perf_counter()
         precise_sleep(max(sleep_time_s, 0.0))
+        sleep_actual_ms = (time.perf_counter() - sleep_start_t) * 1000.0
+
+        if trace_enabled and policy is not None and is_record_frame and policy_trace_events:
+            event = policy_trace_events[-1]
+            loop_metrics = dict(event.get("loop_metrics", {}))
+            loop_metrics.update(
+                {
+                    "control_dt_ms": dt_s * 1000.0,
+                    "sleep_requested_ms": sleep_requested_ms,
+                    "sleep_actual_ms": sleep_actual_ms,
+                    "target_control_interval_ms": control_interval * 1000.0,
+                }
+            )
+            event["loop_metrics"] = loop_metrics
 
         timestamp = time.perf_counter() - start_episode_t
 
