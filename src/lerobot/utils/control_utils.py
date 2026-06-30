@@ -230,22 +230,54 @@ def _get_trace_raw_action_queue(policy: PreTrainedPolicy) -> deque[torch.Tensor]
     return queue
 
 
+def _safe_queue_size(queue: Any) -> int | None:
+    if queue is None:
+        return None
+    try:
+        return len(queue)
+    except TypeError:
+        return None
+
+
 def _get_policy_queue_size(policy: PreTrainedPolicy) -> int | None:
-    queue = getattr(policy, "_action_queue", None)
-    if queue is not None:
-        try:
-            return len(queue)
-        except TypeError:
-            return None
+    processed_size = _safe_queue_size(getattr(policy, "_lerobot_processed_action_queue", None))
+    action_size = _safe_queue_size(getattr(policy, "_action_queue", None))
+    sizes = [size for size in (processed_size, action_size) if size is not None]
+    if not sizes:
+        return None
+    return max(sizes)
 
-    queue = getattr(policy, "_lerobot_processed_action_queue", None)
-    if queue is not None:
-        try:
-            return len(queue)
-        except TypeError:
-            return None
 
-    return None
+def _try_dequeue_cached_policy_action(
+    policy: PreTrainedPolicy,
+    *,
+    return_trace: dict[str, Any] | None = None,
+) -> tuple[PolicyAction | None, bool]:
+    processed_queue = getattr(policy, "_lerobot_processed_action_queue", None)
+    processed_size = _safe_queue_size(processed_queue)
+    if processed_size and processed_size > 0:
+        raw_queue = _get_trace_raw_action_queue(policy)
+        action = processed_queue.popleft()
+        raw_action = raw_queue.popleft() if raw_queue else None
+        if return_trace is not None:
+            return_trace["fast_path_cache_hit"] = True
+            return_trace["cache_queue_type"] = "processed_action_queue"
+            if raw_action is not None:
+                return_trace["raw_policy_action_tensor"] = raw_action
+        return action, True
+
+    action_queue = getattr(policy, "_action_queue", None)
+    action_size = _safe_queue_size(action_queue)
+    if action_size and action_size > 0:
+        action = action_queue.popleft()
+        if return_trace is not None:
+            return_trace["fast_path_cache_hit"] = True
+            return_trace["cache_queue_type"] = "raw_action_queue"
+        return action, False
+
+    if return_trace is not None:
+        return_trace["fast_path_cache_hit"] = False
+    return None, False
 
 
 def _split_postprocessed_chunk(processed_chunk: PolicyAction) -> list[PolicyAction]:
@@ -403,6 +435,63 @@ def predict_action(
         trace["policy_queue_size_before"] = _get_policy_queue_size(policy)
         trace["n_action_steps"] = int(getattr(policy.config, "n_action_steps", 1))
 
+    queue_size_before_select = _get_policy_queue_size(policy)
+    if trace is not None:
+        trace["policy_queue_size_before_select"] = queue_size_before_select
+
+    cached_action = None
+    cache_dequeue_ms = 0.0
+    if action_override is None:
+        start_t = time.perf_counter()
+        cached_action, action_is_final = _try_dequeue_cached_policy_action(policy, return_trace=trace)
+        cache_dequeue_ms = (time.perf_counter() - start_t) * 1000.0
+    elif trace is not None:
+        trace["fast_path_cache_hit"] = False
+
+    if cached_action is not None:
+        if trace is not None:
+            trace["cache_dequeue_ms"] = cache_dequeue_ms
+            trace["prepare_observation_ms"] = 0.0
+            trace["preprocessor_ms"] = 0.0
+            trace["policy_select_ms"] = 0.0
+            trace["chunk_queue_refresh"] = False
+            trace["chunk_decode_path"] = trace.get("cache_queue_type")
+
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
+        ):
+            action = cached_action
+            if not action_is_final:
+                start_t = time.perf_counter()
+                action = postprocessor(action)
+                if trace is not None:
+                    trace["postprocessor_ms"] = (time.perf_counter() - start_t) * 1000.0
+                    if isinstance(action, torch.Tensor):
+                        trace["raw_policy_action_tensor"] = action.detach().cpu().clone()
+
+            if not action_is_final:
+                start_t = time.perf_counter()
+                action = _maybe_convert_pi05_canonical_action_to_robot_action(
+                    action=action,
+                    raw_observation=raw_observation,
+                    prepared_observation=None,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    robot_type=robot_type,
+                )
+                if trace is not None:
+                    trace["action_convert_ms"] = (time.perf_counter() - start_t) * 1000.0
+
+        if trace is not None:
+            trace["policy_queue_size_after"] = _get_policy_queue_size(policy)
+            trace["predict_action_total_ms"] = (
+                trace.get("cache_dequeue_ms", 0.0)
+                + trace.get("postprocessor_ms", 0.0)
+                + trace.get("action_convert_ms", 0.0)
+            )
+        return action
+
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
@@ -442,9 +531,6 @@ def predict_action(
 
         # Compute the next action either from the policy or from a manual override
         # that mimics the raw model output format before post-processing.
-        queue_size_before_select = _get_policy_queue_size(policy)
-        if trace is not None:
-            trace["policy_queue_size_before_select"] = queue_size_before_select
         start_t = time.perf_counter()
         if action_override is not None:
             action = action_override(prepared_observation)

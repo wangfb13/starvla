@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video-backend", type=str, default="pyav")
     parser.add_argument("--gripper-dim", type=int, default=9)
     parser.add_argument("--frame-start", type=int, default=None)
-    parser.add_argument("--chunk-size", type=int, default=50)
+    parser.add_argument("--chunk-size", type=int, default=None)
     parser.add_argument("--context-radius", type=int, default=80)
     parser.add_argument(
         "--selection-mode",
@@ -79,12 +79,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_policy_bundle(checkpoint_dir: Path, device: str):
+def load_policy_config(checkpoint_dir: Path) -> PreTrainedConfig:
     pretrained_dir = checkpoint_dir / "pretrained_model"
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    return PreTrainedConfig.from_pretrained(pretrained_dir, local_files_only=True)
 
-    cfg = PreTrainedConfig.from_pretrained(pretrained_dir, local_files_only=True)
+
+def load_policy_bundle(checkpoint_dir: Path, device: str):
+    pretrained_dir = checkpoint_dir / "pretrained_model"
+    cfg = load_policy_config(checkpoint_dir)
     cfg.device = device
     if cfg.type == "pi05":
         policy_cls = PI05Policy
@@ -217,7 +221,7 @@ def plot_chunk_compare(
     axes[0].plot(xs, gt_chunk[:, gripper_dim], color="black", linewidth=2.4, label="gt")
     for pred, label in zip(preds, labels, strict=True):
         axes[0].plot(xs, pred[:horizon, gripper_dim], linewidth=2.0, linestyle="--", label=label)
-    axes[0].set_title(f"{gripper_name} over selected 50-step chunk")
+    axes[0].set_title(f"{gripper_name} over selected {horizon}-step chunk")
     axes[0].set_xlabel("chunk step")
     axes[0].set_ylabel(gripper_name)
     axes[0].grid(True, alpha=0.25)
@@ -243,6 +247,10 @@ def main() -> None:
     args = parse_args()
     if len(args.checkpoint_dir) != len(args.label):
         raise ValueError("--checkpoint-dir and --label must have the same count.")
+
+    if args.chunk_size is None:
+        cfg = load_policy_config(args.checkpoint_dir[0])
+        args.chunk_size = max(1, int(getattr(cfg, "n_action_steps", 1)))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
