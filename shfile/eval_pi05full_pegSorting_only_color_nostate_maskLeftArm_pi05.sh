@@ -13,6 +13,8 @@ POLICY_PATH="${REPO_ROOT}/outputs/pi05full_sparky_pegSorting_only_color_nostate_
 RUN_TS="$(date '+%Y%m%d_%H%M%S')"
 EVAL_NAME="eval_pi05full_pegSorting_only_color_nostate_maskLeftArm_pi05_005000_${RUN_TS}"
 DATASET_ROOT_BASE="/home/dm/DM_das/datasets"
+LEFT_GRIPPER_OFFSET="${LEFT_GRIPPER_OFFSET:-0.0}"
+RIGHT_GRIPPER_OFFSET="${RIGHT_GRIPPER_OFFSET:-0.0}"
 
 if [ ! -f "${INTRINSICS_PATH}" ]; then
   echo "Missing intrinsics file: ${INTRINSICS_PATH}"
@@ -54,4 +56,6 @@ python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
   --inference_trace.enabled=true \
   --inference_trace.store_io_summaries=true \
   --inference_trace.store_image_keys=true \
+  --gripper_offsets.left="${LEFT_GRIPPER_OFFSET}" \
+  --gripper_offsets.right="${RIGHT_GRIPPER_OFFSET}" \
   --interpolation_multiplier=1

@@ -264,6 +264,16 @@ class InferenceTraceConfig:
     store_image_keys: bool = True
 
 
+@dataclass
+class GripperOffsetConfig:
+    # Offset added to the left gripper command right before robot.send_action()
+    # when the action comes from the policy inference path.
+    left: float = 0.0
+    # Offset added to the right gripper command right before robot.send_action()
+    # when the action comes from the policy inference path.
+    right: float = 0.0
+
+
 def _trace_value(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         if value.ndim == 0:
@@ -726,6 +736,9 @@ class RecordConfig:
     manual_action_test: ManualRelativeLineTestConfig = field(default_factory=ManualRelativeLineTestConfig)
     # Optional per-inference trace capture for later video annotation/debugging.
     inference_trace: InferenceTraceConfig = field(default_factory=InferenceTraceConfig)
+    # Optional gripper offsets applied only to the final command sent to the robot
+    # for policy-driven actions.
+    gripper_offsets: GripperOffsetConfig = field(default_factory=GripperOffsetConfig)
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -782,6 +795,21 @@ class RecordConfig:
 """
 
 
+def _apply_gripper_offsets_to_robot_action(
+    action: RobotAction,
+    offsets: GripperOffsetConfig,
+) -> RobotAction:
+    adjusted = dict(action)
+    for key, offset in (
+        ("main_gripper_left", offsets.left),
+        ("main_gripper_right", offsets.right),
+    ):
+        if key not in adjusted or offset == 0.0:
+            continue
+        adjusted[key] = float(np.clip(float(adjusted[key]) + offset, 0.0, 1.0))
+    return adjusted
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -808,6 +836,7 @@ def record_loop(
     display_compressed_images: bool = False,
     manual_action_test_runner: ManualRelativeLineTestRunner | None = None,
     inference_trace: InferenceTraceConfig | None = None,
+    gripper_offsets: GripperOffsetConfig | None = None,
 ) -> list[dict[str, Any]] | None:
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -861,6 +890,7 @@ def record_loop(
     start_episode_t = time.perf_counter()
     policy_trace_events: list[dict[str, Any]] = []
     recorded_policy_frame_index = 0
+    gripper_offsets = gripper_offsets if gripper_offsets is not None else GripperOffsetConfig()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
         get_observation_time_ms = None
@@ -868,6 +898,7 @@ def record_loop(
         dataset_add_frame_time_ms = None
         sleep_requested_ms = None
         sleep_actual_ms = None
+        action_from_policy = False
         inference_metrics: dict[str, Any] | None = None
 
         if events["exit_early"]:
@@ -892,6 +923,7 @@ def record_loop(
 
         # Get action from either policy or teleop
         if policy is not None and preprocessor is not None and postprocessor is not None:
+            action_from_policy = True
             # With interpolation: only call policy when interpolator needs new action
             if use_interpolation:
                 ran_inference = False
@@ -995,6 +1027,8 @@ def record_loop(
         # i.e. the pre-send action representation produced by the policy/teleop path.
         # If robot-side conversion or clipping is introduced, the recorded dataset action
         # remains whatever was stored in `action_values`, not `_sent_action`.
+        if action_from_policy:
+            robot_action_to_send = _apply_gripper_offsets_to_robot_action(robot_action_to_send, gripper_offsets)
         send_action_start_t = time.perf_counter()
         _sent_action = robot.send_action(robot_action_to_send)
         send_action_time_ms = (time.perf_counter() - send_action_start_t) * 1000.0
@@ -1209,6 +1243,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_compressed_images=display_compressed_images,
                     manual_action_test_runner=manual_action_test_runner,
                     inference_trace=cfg.inference_trace,
+                    gripper_offsets=cfg.gripper_offsets,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -1230,6 +1265,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
                         inference_trace=cfg.inference_trace,
+                        gripper_offsets=cfg.gripper_offsets,
                     )
 
                 if events["rerecord_episode"]:

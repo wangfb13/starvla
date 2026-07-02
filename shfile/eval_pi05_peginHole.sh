@@ -3,6 +3,8 @@ export TOKENIZERS_PARALLELISM=false
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+LEFT_GRIPPER_OFFSET="${LEFT_GRIPPER_OFFSET:-0.0}"
+RIGHT_GRIPPER_OFFSET="${RIGHT_GRIPPER_OFFSET:-0.0}"
 
 python src/lerobot/scripts/lerobot_record.py \
   --robot.type=spark3_pose_gripper \
@@ -40,6 +42,8 @@ python src/lerobot/scripts/lerobot_record.py \
   --policy.path=./outputs/pi05_peg_in_hole_200/30000/pretrained_model \
   --policy.device=cuda \
   --policy.use_amp=true \
+  --gripper_offsets.left="${LEFT_GRIPPER_OFFSET}" \
+  --gripper_offsets.right="${RIGHT_GRIPPER_OFFSET}" \
   --interpolation_multiplier=1
 
 #   --policy.tokenizer_name=/home/lunar/Desktop/paligemma-3b-pt-224 \

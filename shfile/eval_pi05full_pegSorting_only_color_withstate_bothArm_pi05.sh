@@ -14,6 +14,8 @@ POLICY_PATH="${REPO_ROOT}/outputs/pi05full_sparky_pegSorting_only_color_withstat
 RUN_TS="$(date '+%Y%m%d_%H%M%S')"
 EVAL_NAME="eval_pi05full_pegSorting_only_color_withstate_maskLeftArm_pi05_030000_${RUN_TS}"
 DATASET_ROOT_BASE="/home/dm/DM_das/datasets"
+LEFT_GRIPPER_OFFSET="${LEFT_GRIPPER_OFFSET:-0.0}"
+RIGHT_GRIPPER_OFFSET="${RIGHT_GRIPPER_OFFSET:-0.0}"
 
 if [ ! -f "${INTRINSICS_PATH_RIGHT}" ]; then
   echo "Missing intrinsics file: ${INTRINSICS_PATH_RIGHT}"
@@ -65,4 +67,6 @@ python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
   --policy.path="${POLICY_PATH}" \
   --policy.device=cuda \
   --policy.use_amp=true \
+  --gripper_offsets.left="${LEFT_GRIPPER_OFFSET}" \
+  --gripper_offsets.right="${RIGHT_GRIPPER_OFFSET}" \
   --interpolation_multiplier=1
