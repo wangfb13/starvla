@@ -1,0 +1,150 @@
+{
+  "features": {
+    "observation.images.cam_left": {
+      "dtype": "video",
+      "shape": [
+        3,
+        224,
+        224
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "intrinsics": {
+        "model": "none",
+        "params": []
+      }
+    },
+    "observation.images.cam_right": {
+      "dtype": "video",
+      "shape": [
+        3,
+        224,
+        224
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "intrinsics": {
+        "model": "none",
+        "params": []
+      }
+    },
+    "observation.depth_deformation.tactile_left_left": {
+      "dtype": "tactile",
+      "shape": [
+        3,
+        96,
+        128
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "info": {
+        "video.fps": 30.0,
+        "video.height": 96,
+        "video.width": 128,
+        "video.channels": 3,
+        "video.codec": "ffv1",
+        "video.pix_fmt": "gbrp16le",
+        "video.is_depth_map": false,
+        "has_audio": false,
+        "video.encoded_height": 96,
+        "video.encoded_width": 128,
+        "video.tactile_height": 96,
+        "video.tactile_width": 128,
+        "video.tactile_channels": 3
+      }
+    },
+    "observation.depth_deformation.tactile_left_right": {
+      "dtype": "tactile",
+      "shape": [
+        3,
+        96,
+        128
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "info": {
+        "video.fps": 30.0,
+        "video.height": 96,
+        "video.width": 128,
+        "video.channels": 3,
+        "video.codec": "ffv1",
+        "video.pix_fmt": "gbrp16le",
+        "video.is_depth_map": false,
+        "has_audio": false,
+        "video.encoded_height": 96,
+        "video.encoded_width": 128,
+        "video.tactile_height": 96,
+        "video.tactile_width": 128,
+        "video.tactile_channels": 3
+      }
+    },
+    "observation.depth_deformation.tactile_right_left": {
+      "dtype": "tactile",
+      "shape": [
+        3,
+        96,
+        128
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "info": {
+        "video.fps": 30.0,
+        "video.height": 96,
+        "video.width": 128,
+        "video.channels": 3,
+        "video.codec": "ffv1",
+        "video.pix_fmt": "gbrp16le",
+        "video.is_depth_map": false,
+        "has_audio": false,
+        "video.encoded_height": 96,
+        "video.encoded_width": 128,
+        "video.tactile_height": 96,
+        "video.tactile_width": 128,
+        "video.tactile_channels": 3
+      }
+    },
+    "observation.depth_deformation.tactile_right_right": {
+      "dtype": "tactile",
+      "shape": [
+        3,
+        96,
+        128
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "info": {
+        "video.fps": 30.0,
+        "video.height": 96,
+        "video.width": 128,
+        "video.channels": 3,
+        "video.codec": "ffv1",
+        "video.pix_fmt": "gbrp16le",
+        "video.is_depth_map": false,
+        "has_audio": false,
+        "video.encoded_height": 96,
+        "video.encoded_width": 128,
+        "video.tactile_height": 96,
+        "video.tactile_width": 128,
+        "video.tactile_channels": 3
+      }
+    }
+  }
+}

@@ -70,6 +70,7 @@ class PI05FullConfig(PreTrainedConfig):
     tactile_patch_encoder_depth: int = 12
     tactile_resampler_heads: int = 6
     tactile_token_budget_per_sensor: int = 8
+    tactile_contact_topk_ratio: float = 0.05
 
     # Flow matching parameters: see openpi `PI0Pytorch`
     num_inference_steps: int = 10
@@ -210,10 +211,10 @@ class PI05FullConfig(PreTrainedConfig):
             raise ValueError("subtask_regeneration_interval must be non-negative.")
         if self.enable_parsed_tactile_vit:
             self.tactile_encoder_type = "parsed_vit"
-        if self.tactile_encoder_type not in {"flat", "parsed_vit"}:
+        if self.tactile_encoder_type not in {"flat", "parsed_vit", "contact_stats"}:
             raise ValueError(
                 f"Unsupported tactile_encoder_type={self.tactile_encoder_type!r}. "
-                "Expected one of {'flat', 'parsed_vit'}."
+                "Expected one of {'flat', 'parsed_vit', 'contact_stats'}."
             )
         if self.enable_tactile:
             if self.tactile_tokens <= 0:
@@ -222,6 +223,9 @@ class PI05FullConfig(PreTrainedConfig):
                 raise ValueError("max_tactile_dim must be positive., got {self.max_tactile_dim}")
             if not 0.0 <= self.tactile_dropout_prob <= 1.0:
                 raise ValueError("tactile_dropout_prob must be in [0, 1].")
+            if self.tactile_encoder_type == "contact_stats":
+                if not 0.0 < self.tactile_contact_topk_ratio <= 1.0:
+                    raise ValueError("tactile_contact_topk_ratio must be in (0, 1].")
             if self.tactile_encoder_type == "parsed_vit":
                 if self.tactile_input_channels <= 0:
                     raise ValueError("tactile_input_channels must be positive.")

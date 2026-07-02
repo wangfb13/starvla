@@ -725,7 +725,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.enable_tactile = config.enable_tactile
         self.tactile_encoder_type = config.tactile_encoder_type
         if self.enable_tactile:
-            self.tactile_in_proj = nn.Linear(config.max_tactile_dim, paligemma_config.width)
+            tactile_in_dim = 1 if self.tactile_encoder_type == "contact_stats" else config.max_tactile_dim
+            self.tactile_in_proj = nn.Linear(tactile_in_dim, paligemma_config.width)
             self.tactile_fusion_layernorm = nn.LayerNorm(paligemma_config.width)
             self.tactile_gate = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
             self.tactile_modality_embedding = nn.Embedding(1, paligemma_config.width)
@@ -2053,6 +2054,18 @@ class PI05FullPolicy(PreTrainedPolicy):
             resampled = resampled * scale
         return resampled
 
+    def _encode_contact_stats_sensor(self, tensor: Tensor) -> Tensor:
+        if tensor.ndim != 4:
+            raise ValueError(f"Contact tactile tensor must be rank-4 [B,C,H,W], got {tuple(tensor.shape)}")
+        tensor = tensor.to(dtype=torch.float32)
+        if tensor.shape[1] > 1:
+            tensor = tensor.mean(dim=1, keepdim=True)
+        flattened = tensor.flatten(start_dim=2)
+        topk_ratio = self.config.tactile_contact_topk_ratio
+        k = max(1, math.ceil(flattened.shape[-1] * topk_ratio))
+        contact_score = torch.topk(flattened, k=k, dim=-1).values.mean(dim=-1, keepdim=True)
+        return contact_score
+
     def _prepare_tactile(
         self, batch: dict[str, Tensor]
     ) -> tuple[Tensor | None, Tensor | None, dict[str, Tensor] | None]:
@@ -2090,6 +2103,22 @@ class PI05FullPolicy(PreTrainedPolicy):
                 cursor += encoded.shape[1]
 
             tactile_tokens = torch.cat(parsed_tokens_per_sensor, dim=1)
+        elif self.config.tactile_encoder_type == "contact_stats" and tactile_keys:
+            contact_tokens_per_sensor: list[Tensor] = []
+            for key in tactile_keys:
+                tensor = batch[key].to(device=device, dtype=torch.float32)
+                if tensor.ndim == 5:
+                    tensor = tensor[:, -1]
+                if tensor.ndim == 4 and tensor.shape[-1] in {1, 3} and tensor.shape[1] not in {1, 3}:
+                    tensor = tensor.permute(0, 3, 1, 2)
+                if tensor.ndim != 4:
+                    raise ValueError(f"Contact tactile feature {key} must be rank-4, got {tuple(tensor.shape)}")
+                encoded = self._encode_contact_stats_sensor(tensor)
+                contact_tokens_per_sensor.append(encoded)
+                tactile_segments.append((key, cursor, cursor + encoded.shape[1]))
+                cursor += encoded.shape[1]
+
+            tactile_tokens = torch.cat(contact_tokens_per_sensor, dim=1)
         else:
             tactile_vectors: list[Tensor] = []
             num_tactile_keys = max(1, len(tactile_keys))
@@ -2157,6 +2186,68 @@ class PI05FullPolicy(PreTrainedPolicy):
         else:
             tactile_token_masks = tactile_token_masks & present[:, None]
         return tactile_tokens, tactile_token_masks, tactile_role_metadata
+
+    def _collect_tactile_metrics(
+        self,
+        batch: dict[str, Tensor],
+        tactile_tokens: Tensor | None,
+        tactile_token_masks: Tensor | None,
+    ) -> dict[str, float]:
+        if not self.config.enable_tactile:
+            return {}
+
+        metrics: dict[str, float] = {
+            "tactile_num_sensors": float(len(self._resolve_tactile_keys(batch))),
+        }
+        if hasattr(self.model, "tactile_gate"):
+            metrics["tactile_gate"] = float(torch.sigmoid(self.model.tactile_gate.detach()).item())
+
+        if tactile_tokens is None:
+            metrics["tactile_present_mean"] = 0.0
+            metrics["tactile_token_mask_mean"] = 0.0
+            return metrics
+
+        if tactile_token_masks is None:
+            tactile_token_masks = torch.ones(
+                tactile_tokens.shape[:2],
+                dtype=torch.bool,
+                device=tactile_tokens.device,
+            )
+        else:
+            tactile_token_masks = tactile_token_masks.to(device=tactile_tokens.device, dtype=torch.bool)
+
+        metrics["tactile_token_mask_mean"] = float(tactile_token_masks.float().mean().item())
+        metrics["tactile_present_mean"] = float(tactile_token_masks.any(dim=1).float().mean().item())
+
+        valid_token_rows = tactile_tokens[tactile_token_masks]
+        if valid_token_rows.numel() == 0:
+            metrics["tactile_token_abs_mean"] = 0.0
+            metrics["tactile_token_std"] = 0.0
+            return metrics
+
+        metrics["tactile_token_abs_mean"] = float(valid_token_rows.abs().mean().item())
+        metrics["tactile_token_std"] = (
+            float(valid_token_rows.float().std(unbiased=False).item()) if valid_token_rows.numel() > 1 else 0.0
+        )
+
+        if self.config.tactile_encoder_type == "contact_stats" and valid_token_rows.shape[-1] == 1:
+            contact_values = valid_token_rows[:, 0]
+            metrics["tactile_contact_mean"] = float(contact_values.mean().item())
+            metrics["tactile_contact_max"] = float(contact_values.max().item())
+            metrics["tactile_contact_std"] = (
+                float(contact_values.float().std(unbiased=False).item()) if contact_values.numel() > 1 else 0.0
+            )
+
+            tactile_keys = self._resolve_tactile_keys(batch)
+            for sensor_idx, key in enumerate(tactile_keys[: tactile_tokens.shape[1]]):
+                sensor_mask = tactile_token_masks[:, sensor_idx]
+                if not torch.any(sensor_mask):
+                    continue
+                sensor_values = tactile_tokens[:, sensor_idx, 0][sensor_mask]
+                sensor_name = key.split(".")[-1]
+                metrics[f"tactile_contact_{sensor_name}_mean"] = float(sensor_values.mean().item())
+
+        return metrics
 
     def prepare_action(self, batch):
         """Pad action"""
@@ -2521,6 +2612,7 @@ class PI05FullPolicy(PreTrainedPolicy):
             "loss_per_dim": loss_per_dim.detach().cpu().numpy().tolist(),
             "subtask_ce_loss": subtask_ce_loss.item(),
         }
+        loss_dict.update(self._collect_tactile_metrics(batch, tactile_tokens, tactile_token_masks))
         inter_arm_pos_loss_per_sample, inter_arm_pos_loss = self._compute_inter_arm_position_loss(
             predicted_actions,
             target_actions,
