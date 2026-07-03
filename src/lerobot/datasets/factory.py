@@ -474,7 +474,7 @@ def resolve_delta_timestamps(
     for key in feature_source:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        if key == ACTION and action_delta_indices is not None:
+        if key in (ACTION, ACTION + "_episode_ee", ACTION + "_absolute_ee") and action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in action_delta_indices]
         if key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]

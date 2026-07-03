@@ -145,6 +145,13 @@ wallx = [
 ]
 pi = ["lerobot[transformers-dep]", "lerobot[scipy-dep]"]
 smolvla = ["lerobot[transformers-dep]", "num2words>=0.5.14,<0.6.0", "accelerate>=1.7.0,<2.0.0", "safetensors>=0.4.3,<1.0.0"]
+starvla_groot = [
+    "lerobot[transformers-dep]",
+    "lerobot[qwen-vl-utils-dep]",
+    "lerobot[matplotlib-dep]",
+    "timm>=1.0.0,<1.1.0",
+    "Pillow>=10.0.0,<13.0.0",
+]
 multi_task_dit = ["lerobot[transformers-dep]"]
 groot = [
     "lerobot[transformers-dep]",
@@ -194,6 +201,7 @@ all = [
     "lerobot[wallx]",
     "lerobot[pi]",
     "lerobot[smolvla]",
+    "lerobot[starvla_groot]",
     # "lerobot[groot]", TODO(Steven): Gr00t requires specific installation instructions for flash-attn
     "lerobot[xvla]",
     "lerobot[hilserl]",

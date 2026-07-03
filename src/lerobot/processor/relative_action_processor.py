@@ -23,7 +23,8 @@ from torch import Tensor
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.types import EnvTransition, TransitionKey
-from lerobot.utils.constants import OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_STATE
+from lerobot.utils.ee_transforms import ee_to_absolute, ee_to_relative
 
 from .delta_action_processor import MapDeltaActionToRobotActionStep, MapTensorToDeltaActionDictStep
 from .pipeline import ProcessorStep, ProcessorStepRegistry
@@ -34,6 +35,7 @@ __all__ = [
     "MapTensorToDeltaActionDictStep",
     "RelativeActionsProcessorStep",
     "AbsoluteActionsProcessorStep",
+    "route_ee_batch",
     "to_relative_actions",
     "to_absolute_actions",
     "to_keyframe_relative_actions",
@@ -42,6 +44,39 @@ __all__ = [
 
 
 LOGGER = logging.getLogger(__name__)
+
+OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"
+ACTION_EPISODE_EE = ACTION + "_episode_ee"
+OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"
+ACTION_ABSOLUTE_EE = ACTION + "_absolute_ee"
+
+
+def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
+    """Select EE columns as canonical ``observation.state`` / ``action`` in-place.
+
+    Offline EE datasets may carry joint columns plus
+    ``observation.state_episode_ee`` / ``observation.state_absolute_ee`` and
+    ``action_episode_ee`` / ``action_absolute_ee``. Policies still consume the
+    canonical LeRobot keys, so this routing must happen before batch-to-transition
+    conversion in the policy preprocessor.
+    """
+
+    def _route(dst: str, src: str) -> None:
+        if src in batch:
+            batch[dst] = batch.pop(src)
+            if src + "_is_pad" in batch:
+                batch[dst + "_is_pad"] = batch.pop(src + "_is_pad")
+
+    if state_mode == "episode_ee":
+        _route(OBS_STATE, OBS_STATE_EPISODE_EE)
+    elif state_mode == "absolute_ee":
+        _route(OBS_STATE, OBS_STATE_ABSOLUTE_EE)
+
+    if action_mode == "relative_ee":
+        src = ACTION_ABSOLUTE_EE if state_mode == "absolute_ee" else ACTION_EPISODE_EE
+        _route(ACTION, src)
+
+    return batch
 
 
 def _rotation_6d_to_matrix(rot6d: Tensor) -> Tensor:
@@ -294,6 +329,10 @@ class RelativeActionsProcessorStep(ProcessorStep):
     action_names: list[str] | None = None
     relative_action_keyframes: list[str] = field(default_factory=list)
     relative_exclude_keys: list[str] = field(default_factory=list)
+    # mode="joint": element-wise action -= state with optional keyframe SE(3) blocks.
+    # mode="pose": packed EE pose [pos3, rot6d6, gripper1] per arm; action becomes St^-1 * action.
+    mode: str = "joint"
+    n_arms: int = 2
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
@@ -319,7 +358,11 @@ class RelativeActionsProcessorStep(ProcessorStep):
         observation = transition.get(TransitionKey.OBSERVATION, {})
         state = observation.get(OBS_STATE) if observation else None
 
-        # Always cache state for the paired AbsoluteActionsProcessorStep
+        # Pose mode anchors relative EE actions at the most recent state frame.
+        if state is not None and self.mode == "pose" and state.ndim == 3:
+            state = state[:, -1]
+
+        # Always cache state for the paired AbsoluteActionsProcessorStep.
         if state is not None:
             self._last_state = state
 
@@ -329,6 +372,12 @@ class RelativeActionsProcessorStep(ProcessorStep):
         new_transition = transition.copy()
         action = new_transition.get(TransitionKey.ACTION)
         if action is None or state is None:
+            return new_transition
+
+        if self.mode == "pose":
+            if state.device != action.device or state.dtype != action.dtype:
+                state = state.to(device=action.device, dtype=action.dtype)
+            new_transition[TransitionKey.ACTION] = ee_to_relative(state, action, n_arms=self.n_arms)
             return new_transition
 
         mask = self._build_mask(action.shape[-1])
@@ -356,6 +405,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "action_names": self.action_names,
             "relative_action_keyframes": self.relative_action_keyframes,
             "relative_exclude_keys": self.relative_exclude_keys,
+            "mode": self.mode,
+            "n_arms": self.n_arms,
         }
 
     def transform_features(
@@ -391,7 +442,8 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
                 "but relative_step is None. Ensure relative_step is set when constructing the postprocessor."
             )
 
-        if self.relative_step._last_state is None:
+        cached_state = self.relative_step._last_state
+        if cached_state is None:
             raise RuntimeError(
                 "AbsoluteActionsProcessorStep requires state from RelativeActionsProcessorStep "
                 "but no state has been cached. Ensure the preprocessor runs before the postprocessor."
@@ -400,6 +452,14 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
         new_transition = transition.copy()
         action = new_transition.get(TransitionKey.ACTION)
         if action is None:
+            return new_transition
+
+        if self.relative_step.mode == "pose":
+            if cached_state.device != action.device or cached_state.dtype != action.dtype:
+                cached_state = cached_state.to(device=action.device, dtype=action.dtype)
+            new_transition[TransitionKey.ACTION] = ee_to_absolute(
+                cached_state, action, n_arms=self.relative_step.n_arms
+            )
             return new_transition
 
         mask = self.relative_step._build_mask(action.shape[-1])
@@ -411,14 +471,14 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
             compatible_specs = _compatible_keyframe_specs(
                 specs,
                 action_dim=action.shape[-1],
-                state_dim=self.relative_step._last_state.shape[-1],
+                state_dim=cached_state.shape[-1],
             )
             mask = _mask_keyframe_dims(mask, compatible_specs)
-        action = to_absolute_actions(action, self.relative_step._last_state, mask)
+        action = to_absolute_actions(action, cached_state, mask)
         if specs:
             action = to_keyframe_absolute_actions(
                 action,
-                self.relative_step._last_state,
+                cached_state,
                 self.relative_step.relative_action_keyframes,
                 self.relative_step.relative_exclude_keys,
             )

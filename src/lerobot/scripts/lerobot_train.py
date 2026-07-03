@@ -36,6 +36,7 @@ from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.processor.relative_action_processor import route_ee_batch
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.import_utils import register_third_party_plugins
@@ -484,6 +485,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
+        batch = route_ee_batch(
+            batch,
+            getattr(cfg.policy, "state_mode", "joint"),
+            getattr(cfg.policy, "action_mode", "joint"),
+        )
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
