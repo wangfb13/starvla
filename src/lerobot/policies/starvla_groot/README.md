@@ -23,7 +23,7 @@ python -m lerobot.scripts.lerobot_train \
   --policy.base_vlm=./playground/pretrained_models/Qwen3.5-0.8B \
   --policy.chunk_size=8 \
   --policy.n_action_steps=8 \
-  --policy.state_mode=joint \
+  --policy.state_mode=raw \
   --policy.top_camera_keys='["observation.images.cam_top"]' \
   --policy.wrist_camera_keys='["observation.images.cam_right_wrist"]' \
   --batch_size=8 \
@@ -51,8 +51,8 @@ Migration notes:
 - `tactile_mode=none`, `tactile_mode=as_image`, and `tactile_mode=encode` are available.
 - `tactile_mode=encode` requires `--policy.tactile_encoder_path` pointing to a tactile-MAE
   checkpoint or converted HF-style directory.
-- Control vectors are passed through unchanged: `state_mode=joint` keeps the raw
-  `observation.state`, and `action_mode=joint` trains/predicts the raw `action`.
+- Control vectors are passed through unchanged: `state_mode=raw` keeps the raw
+  `observation.state`, and `action_mode=raw` trains/predicts the raw `action`.
   Any flange/TCP conversion or robot-space mapping should stay in the existing
   humanoid data/control pipeline.
 

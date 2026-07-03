@@ -20,7 +20,7 @@ Three knobs, unified across act / diffusion / pi05 / starvla_groot:
 - ``wrist_only``: ``True`` uses only the wrist camera; ``False`` uses top + wrist.
 - ``tactile_mode``: ``none`` (tactile unused) / ``as_image`` (tactile fed as
   extra image inputs) / ``encode`` (tactile through the tactile-MAE encoder).
-- ``state_mode``: ``none`` (no proprio state) / ``joint`` (raw proprioceptive state).
+- ``state_mode``: ``none`` (no proprio state) / ``raw`` (raw proprioceptive state).
 
 The bulk of the routing is feature selection performed at ``validate_features()``
 time via the composable helpers below, so the model code only needs to consume
@@ -33,8 +33,8 @@ from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 
 VALID_TACTILE_MODES = ("none", "as_image", "encode")
-VALID_STATE_MODES = ("none", "joint")
-VALID_ACTION_MODES = ("joint",)
+VALID_STATE_MODES = ("none", "raw")
+VALID_ACTION_MODES = ("raw",)
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
 VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
 
@@ -92,10 +92,11 @@ class SensorRoutingMixin:
     freeze_tactile_encoder: bool = False
 
     # --- state / action routing ---
-    # "joint" means raw state/action passthrough: the policy learns whatever vector
-    # the dataset already stores (joint angles, TCP pose, or another humanoid control space).
-    state_mode: str = "joint"  # none | joint
-    action_mode: str = "joint"  # joint
+    # "raw" means state/action passthrough: the policy learns whatever vector the
+    # dataset already stores (joint angles, TCP pose, or another humanoid control space).
+    # Backward compatibility: validate_sensor_modes maps legacy "joint" to "raw".
+    state_mode: str = "raw"  # none | raw
+    action_mode: str = "raw"  # raw
 
     # ------------------------------------------------------------------
     # Key resolution
@@ -179,6 +180,10 @@ class SensorRoutingMixin:
     # ------------------------------------------------------------------
     def validate_sensor_modes(self) -> None:
         """Enum validation + reserved-mode gating. Call from ``__post_init__``."""
+        if self.state_mode == "joint":
+            self.state_mode = "raw"
+        if self.action_mode == "joint":
+            self.action_mode = "raw"
         if self.tactile_mode not in VALID_TACTILE_MODES:
             raise ValueError(
                 f"Invalid tactile_mode '{self.tactile_mode}'. Expected one of {VALID_TACTILE_MODES}."
@@ -246,18 +251,18 @@ class SensorRoutingMixin:
     def apply_state_mode(self, padded_state_dim: int | None = None) -> None:
         """Route the proprioceptive state according to ``state_mode``.
 
-        ``joint`` is intentionally a passthrough mode: ``observation.state`` is
-        kept exactly as provided by the dataset or real-time observation. Any
-        flange/TCP conversion stays outside the policy.
+        ``raw`` is a passthrough mode: ``observation.state`` is kept exactly as
+        provided by the dataset or real-time observation. Any flange/TCP
+        conversion stays outside the policy.
 
         - ``none``: remove ``observation.state`` (all variants).
-        - ``joint``: keep raw ``observation.state``; if ``padded_state_dim`` is
-                     given and state is missing, materialise a padded state feature
-                     (pi05-style).
+        - ``raw``: keep raw ``observation.state``; if ``padded_state_dim`` is
+                   given and state is missing, materialise a padded state feature
+                   (pi05-style).
         """
         if self.state_mode == "none":
             self.input_features.pop(OBS_STATE, None)
-        elif self.state_mode == "joint":
+        elif self.state_mode == "raw":
             if padded_state_dim is not None and OBS_STATE not in self.input_features:
                 self.input_features[OBS_STATE] = PolicyFeature(
                     type=FeatureType.STATE, shape=(padded_state_dim,)

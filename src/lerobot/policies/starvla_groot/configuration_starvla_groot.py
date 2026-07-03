@@ -155,7 +155,7 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             self.output_features = {}
         if self.state_mode == "none" and (self.use_relative_actions or self.canonicalize_bimanual_rot6d):
             raise ValueError(
-                "StarvlaGroot requires state_mode='joint' when use_relative_actions "
+                "StarvlaGroot requires state_mode='raw' when use_relative_actions "
                 "or canonicalize_bimanual_rot6d is enabled."
             )
 
