@@ -123,6 +123,16 @@ def _ensure_online_sidecar_batch_dims(
         if value.ndim <= 1:
             observation[key] = value.unsqueeze(0)
 
+    # Runtime tactile sidecar tensors are injected in CHW format.
+    # Add the missing batch dimension so tactile encoders receive [B,C,H,W].
+    tactile_feature_keys = list(getattr(policy.config, "tactile_feature_keys", []) or [])
+    for key in tactile_feature_keys:
+        value = observation.get(key)
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.ndim == 3:
+            observation[key] = value.unsqueeze(0)
+
 
 def _maybe_convert_pi05_canonical_action_to_robot_action(
     *,
@@ -297,6 +307,10 @@ def _split_postprocessed_chunk(processed_chunk: PolicyAction) -> list[PolicyActi
     return [processed_chunk[:, step_idx, :] for step_idx in range(processed_chunk.shape[1])]
 
 
+def _get_action_execution_skip_start_steps(policy: PreTrainedPolicy) -> int:
+    return max(0, int(getattr(policy.config, "action_execution_skip_start_steps", 0)))
+
+
 def _predict_action_with_shared_reference_chunk(
     *,
     observation: dict[str, Any],
@@ -317,8 +331,14 @@ def _predict_action_with_shared_reference_chunk(
             return_trace["raw_policy_action_tensor"] = raw_action
         return action
 
+    skip_start_steps = _get_action_execution_skip_start_steps(policy)
     raw_chunk = policy.predict_action_chunk(observation)[:, : policy.config.n_action_steps]
+    if skip_start_steps:
+        raw_chunk = raw_chunk[:, skip_start_steps:]
     processed_chunk = postprocessor(raw_chunk)
+    if return_trace is not None:
+        return_trace["chunk_skip_start_steps"] = skip_start_steps
+        return_trace["chunk_execution_steps"] = int(raw_chunk.shape[1])
 
     for step_action in _split_postprocessed_chunk(processed_chunk):
         raw_queue.append(step_action.detach().cpu().clone())
@@ -363,7 +383,14 @@ def _decode_override_chunk_with_shared_reference(
             return_trace["raw_policy_action_tensor"] = raw_action
         return action
 
+    skip_start_steps = _get_action_execution_skip_start_steps(policy)
+    if isinstance(raw_chunk, torch.Tensor) and skip_start_steps:
+        raw_chunk = raw_chunk[:, skip_start_steps:]
     processed_chunk = postprocessor(raw_chunk)
+    if return_trace is not None:
+        return_trace["chunk_skip_start_steps"] = skip_start_steps
+        if isinstance(raw_chunk, torch.Tensor) and raw_chunk.ndim >= 2:
+            return_trace["chunk_execution_steps"] = int(raw_chunk.shape[1])
     for step_action in _split_postprocessed_chunk(processed_chunk):
         raw_queue.append(step_action.detach().cpu().clone())
         queue.append(
@@ -568,6 +595,7 @@ def predict_action(
             if trace is not None:
                 trace["chunk_queue_refresh"] = queue_size_before_select == 0 if queue_size_before_select is not None else None
                 trace["chunk_decode_path"] = "policy_select_action"
+                trace["chunk_skip_start_steps"] = _get_action_execution_skip_start_steps(policy)
             action = policy.select_action(observation)
         if trace is not None:
             trace["policy_select_ms"] = (time.perf_counter() - start_t) * 1000.0

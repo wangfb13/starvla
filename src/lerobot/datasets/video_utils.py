@@ -1189,7 +1189,7 @@ def get_video_info(video_path: Path | str) -> dict:
         # Calculate fps from r_frame_rate
         video_info["video.fps"] = int(video_stream.base_rate)
 
-        pixel_channels = get_video_pixel_channels(video_stream.pix_fmt)
+        pixel_channels = get_video_pixel_channels(video_stream.pix_fmt, video_path=video_path)
         video_info["video.channels"] = pixel_channels
 
     # Reset logging level
@@ -1201,7 +1201,15 @@ def get_video_info(video_path: Path | str) -> dict:
     return video_info
 
 
-def get_video_pixel_channels(pix_fmt: str) -> int:
+def get_video_pixel_channels(pix_fmt: str | None, video_path: Path | str | None = None) -> int:
+    if pix_fmt is None:
+        lowered_path = str(video_path).lower() if video_path is not None else ""
+        if "depth_deformation" in lowered_path or "depth_shear" in lowered_path:
+            return 3
+        if "depth" in lowered_path or "monochrome" in lowered_path:
+            return 1
+        raise ValueError("Unknown format: pixel format is missing")
+
     if "gray" in pix_fmt or "depth" in pix_fmt or "monochrome" in pix_fmt:
         return 1
     elif "rgba" in pix_fmt or "yuva" in pix_fmt:

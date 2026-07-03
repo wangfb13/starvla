@@ -36,6 +36,8 @@ class PI05FullConfig(PreTrainedConfig):
     n_obs_steps: int = 1
     chunk_size: int = 50  # Number of action steps to predict, in openpi called "action_horizon"
     n_action_steps: int = 50  # Number of action steps to execute
+    # Number of earliest predicted steps to drop from each action chunk during online execution.
+    action_execution_skip_start_steps: int = 0
     action_gap_frames: int = 0  # Future action offset applied before chunk sampling
     action_gap_dataset_overrides: list[str] = field(default_factory=list)
     apply_action_gap_to_real_datasets: bool = False
@@ -167,6 +169,13 @@ class PI05FullConfig(PreTrainedConfig):
         if self.n_action_steps > self.chunk_size:
             raise ValueError(
                 f"n_action_steps ({self.n_action_steps}) cannot be greater than chunk_size ({self.chunk_size})"
+            )
+        if self.action_execution_skip_start_steps < 0:
+            raise ValueError("action_execution_skip_start_steps must be non-negative.")
+        if self.action_execution_skip_start_steps >= self.n_action_steps:
+            raise ValueError(
+                "action_execution_skip_start_steps must be smaller than n_action_steps "
+                f"({self.action_execution_skip_start_steps} >= {self.n_action_steps})."
             )
         if self.action_gap_frames < 0:
             raise ValueError("action_gap_frames must be non-negative.")
