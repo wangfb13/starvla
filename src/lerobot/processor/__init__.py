@@ -78,7 +78,6 @@ from .policy_robot_bridge import (
 from .relative_action_processor import (
     AbsoluteActionsProcessorStep,
     RelativeActionsProcessorStep,
-    route_ee_batch,
     to_absolute_actions,
     to_relative_actions,
 )
@@ -109,7 +108,6 @@ __all__ = [
     "make_default_robot_observation_processor",
     "AbsoluteActionsProcessorStep",
     "RelativeActionsProcessorStep",
-    "route_ee_batch",
     "MapDeltaActionToRobotActionStep",
     "MapTensorToDeltaActionDictStep",
     "NormalizerProcessorStep",

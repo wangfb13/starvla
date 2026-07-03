@@ -28,11 +28,13 @@ import torch
 
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
+    AbsoluteActionsProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     ProcessorStep,
+    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     UnnormalizerProcessorStep,
 )
@@ -41,7 +43,10 @@ from lerobot.utils.constants import (
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
-from lerobot.policies.ee_processor_utils import make_ee_relative_steps, remap_ee_dataset_stats
+from lerobot.policies.pi05.processor_pi05 import (
+    Pi05ApplyMasksProcessorStep,
+    Pi05CanonicalizeBimanualRot6DProcessorStep,
+)
 
 from .configuration_starvla_groot import StarvlaGrootConfig
 
@@ -53,24 +58,44 @@ def make_starvla_groot_pre_post_processors(
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
 ]:
-    # EE modes (state_mode=episode_ee / action_mode=relative_ee): remap stats to canonical keys and
-    # convert action to/from the relative EE pose. No-op for joint modes.
-    dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
-    relative_step, absolute_step = make_ee_relative_steps(config)
-
     processor_features = {**config.normalizer_input_features(), **config.output_features}
+    relative_step = RelativeActionsProcessorStep(
+        enabled=config.use_relative_actions,
+        exclude_joints=getattr(config, "relative_exclude_joints", []),
+        action_names=getattr(config, "action_feature_names", None),
+        relative_action_keyframes=getattr(config, "relative_action_keyframes", []),
+        relative_exclude_keys=getattr(config, "relative_exclude_keys", []),
+    )
 
     input_steps: list[ProcessorStep] = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
-        relative_step,
-        NormalizerProcessorStep(
-            features=processor_features,
-            norm_map=config.normalization_mapping,
-            stats=dataset_stats,
-        ),
-        DeviceProcessorStep(device=config.device),
     ]
+    if config.canonicalize_bimanual_rot6d:
+        input_steps.append(
+            Pi05CanonicalizeBimanualRot6DProcessorStep(
+                source_action_feature_names=config.source_action_feature_names,
+                source_state_feature_names=config.source_state_feature_names,
+                missing_value=config.canonical_missing_value,
+                action_mask_observation_key=config.action_mask_observation_key,
+                state_mask_observation_key=config.state_mask_observation_key,
+            )
+        )
+    input_steps.extend(
+        [
+            relative_step,
+            NormalizerProcessorStep(
+                features=processor_features,
+                norm_map=config.normalization_mapping,
+                stats=dataset_stats,
+            ),
+            Pi05ApplyMasksProcessorStep(
+                action_mask_observation_key=config.action_mask_observation_key,
+                state_mask_observation_key=config.state_mask_observation_key,
+            ),
+            DeviceProcessorStep(device=config.device),
+        ]
+    )
 
     output_steps: list[ProcessorStep] = [
         UnnormalizerProcessorStep(
@@ -78,7 +103,7 @@ def make_starvla_groot_pre_post_processors(
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
         ),
-        absolute_step,
+        AbsoluteActionsProcessorStep(enabled=config.use_relative_actions, relative_step=relative_step),
         DeviceProcessorStep(device="cpu"),
     ]
 

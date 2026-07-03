@@ -26,7 +26,7 @@ import importlib.util
 import torch
 from torch import Tensor
 
-from lerobot.utils.constants import ACTION, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ACTION_MASK, OBS_STATE
 
 from ..pretrained import PreTrainedPolicy
 from ..tactile_encode import TactileEncoder
@@ -50,7 +50,7 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
 
         # Resolve action / state dims from dataset features (real, un-padded dims).
         action_dim = config.action_dim or int(config.output_features[ACTION].shape[0])
-        if config.state_mode == "none":
+        if not config.use_state_input or config.state_mode == "none":
             state_dim = 0
         elif config.state_dim is not None:
             state_dim = int(config.state_dim)
@@ -189,7 +189,7 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
         return list(tasks)
 
     def _get_state(self, batch: dict[str, Tensor], device, dtype) -> Tensor | None:
-        if self.config.state_mode == "none" or self.state_dim == 0:
+        if not self.config.use_state_input or self.config.state_mode == "none" or self.state_dim == 0:
             return None
         if OBS_STATE not in batch:
             return None
@@ -197,6 +197,30 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
         if state.dim() == 2:
             state = state.unsqueeze(1)  # [B, 1, state_dim]
         return state
+
+    def _prepare_action_mask(self, batch: dict[str, Tensor], device, dtype) -> Tensor | None:
+        action_mask = batch.get(self.config.action_mask_observation_key)
+        if action_mask is None:
+            action_mask = batch.get(OBS_ACTION_MASK)
+        if action_mask is None:
+            action_mask = batch.get("action_valid_mask")
+        if action_mask is None:
+            return None
+
+        action_mask = action_mask.to(device=device, dtype=dtype)
+        if action_mask.ndim == 2:
+            action_mask = action_mask[:, None, :].expand(-1, self.config.chunk_size, -1)
+        elif action_mask.ndim == 3:
+            action_mask = action_mask[:, -self.config.chunk_size :, :]
+        else:
+            raise ValueError(f"Expected action mask rank 2 or 3, got shape {tuple(action_mask.shape)}")
+
+        if action_mask.shape[-1] > self.action_dim:
+            action_mask = action_mask[..., : self.action_dim]
+        elif action_mask.shape[-1] < self.action_dim:
+            pad_shape = (*action_mask.shape[:-1], self.action_dim - action_mask.shape[-1])
+            action_mask = torch.cat([action_mask, torch.zeros(pad_shape, device=device, dtype=dtype)], dim=-1)
+        return action_mask
 
     def _encode_prefix(self, batch: dict[str, Tensor]):
         """Run the VLM and return (last_hidden_state, attention_mask)."""
@@ -254,9 +278,14 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
             # Single noise sample per element. (Variance reduction via larger batch_size,
             # not by replicating the action head — replication is reserved for inference.)
             state = self._get_state(batch, last_hidden.device, last_hidden.dtype)
+            action_mask = self._prepare_action_mask(batch, last_hidden.device, last_hidden.dtype)
 
             per_sample_loss = self.action_head(
-                last_hidden, actions_target, state, encoder_attention_mask=attention_mask
+                last_hidden,
+                actions_target,
+                state,
+                encoder_attention_mask=attention_mask,
+                action_mask=action_mask,
             )  # (B,)
 
         loss_dict = {"action_loss": per_sample_loss.mean().item()}
@@ -280,19 +309,27 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
 
         with torch.autocast("cuda", dtype=torch.float32):
             state = self._get_state(batch, last_hidden.device, last_hidden.dtype)
+            action_mask = self._prepare_action_mask(batch, last_hidden.device, last_hidden.dtype)
 
             if reps > 1:
                 bsize = last_hidden.shape[0]
                 last_hidden_rep = last_hidden.repeat(reps, 1, 1)
                 attn_rep = attention_mask.repeat(reps, 1) if attention_mask is not None else None
                 state_rep = state.repeat(reps, 1, 1) if state is not None else None
+                action_mask_rep = action_mask.repeat(reps, 1, 1) if action_mask is not None else None
                 pred_rep = self.action_head.predict_action(
-                    last_hidden_rep, state_rep, encoder_attention_mask=attn_rep
+                    last_hidden_rep,
+                    state_rep,
+                    encoder_attention_mask=attn_rep,
+                    action_mask=action_mask_rep,
                 )  # [B * reps, chunk, action_dim]
                 pred_actions = pred_rep.view(reps, bsize, *pred_rep.shape[1:]).mean(dim=0)
             else:
                 pred_actions = self.action_head.predict_action(
-                    last_hidden, state, encoder_attention_mask=attention_mask
+                    last_hidden,
+                    state,
+                    encoder_attention_mask=attention_mask,
+                    action_mask=action_mask,
                 )  # [B, chunk, action_dim]
 
         return pred_actions.to(dtype=torch.float32)

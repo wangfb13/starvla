@@ -371,7 +371,7 @@ def make_pre_post_processors(
             )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
 
-        if pretrained_path and isinstance(policy_cfg, PI05Config) and getattr(
+        if pretrained_path and isinstance(policy_cfg, (PI05Config, StarvlaGrootConfig)) and getattr(
             policy_cfg, "canonicalize_bimanual_rot6d", False
         ):
             # Older saved PI0.5 preprocessors may omit canonical source feature names.
@@ -699,7 +699,7 @@ def make_policy(
                 cfg.relative_exclude_joints = extend_relative_exclude_joints(
                     getattr(cfg, "relative_exclude_joints", [])
                 )
-        elif sidecar_canonical_loaded and cfg.type in {"pi05", "pi05_full"}:
+        elif sidecar_canonical_loaded and cfg.type in {"pi05", "pi05_full", "starvla_groot"}:
             if isinstance(cfg, PI05FullConfig):
                 from lerobot.policies.pi05_full.canonical_bimanual import (
                     canonical_action_feature_names,

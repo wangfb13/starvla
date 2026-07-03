@@ -173,6 +173,7 @@ class FlowmatchingActionHead(nn.Module):
         actions: torch.Tensor,
         state: torch.Tensor = None,
         encoder_attention_mask=None,
+        action_mask: torch.Tensor = None,
     ):
         """
         vl_embs: shape (B, seq_length, feature_dim)
@@ -180,9 +181,16 @@ class FlowmatchingActionHead(nn.Module):
         Returns the scalar flow-matching MSE loss.
         """
         device = vl_embs.device
+        if action_mask is not None:
+            action_mask = action_mask.to(device=actions.device, dtype=actions.dtype)
+            if action_mask.ndim == 2:
+                action_mask = action_mask[:, None, :].expand(actions.shape[0], actions.shape[1], -1)
 
         # Embed noised action trajectory.
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+        if action_mask is not None:
+            actions = actions * action_mask
+            noise = noise * action_mask
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
 
@@ -217,7 +225,11 @@ class FlowmatchingActionHead(nn.Module):
         pred_actions = pred[:, -actions.shape[1] :]
 
         # Per-sample loss (B,) so the caller can choose mean / weighting.
-        loss = ((pred_actions - velocity) ** 2).mean(dim=(1, 2))
+        losses = (pred_actions - velocity) ** 2
+        if action_mask is not None:
+            losses = losses * action_mask
+            return losses.sum(dim=(1, 2)) / action_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        loss = losses.mean(dim=(1, 2))
         return loss
 
     @torch.no_grad()
@@ -226,6 +238,7 @@ class FlowmatchingActionHead(nn.Module):
         vl_embs: torch.Tensor,
         state: torch.Tensor = None,
         encoder_attention_mask=None,
+        action_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         batch_size = vl_embs.shape[0]
         device = vl_embs.device
@@ -234,6 +247,11 @@ class FlowmatchingActionHead(nn.Module):
             dtype=vl_embs.dtype,
             device=device,
         )
+        if action_mask is not None:
+            action_mask = action_mask.to(device=device, dtype=actions.dtype)
+            if action_mask.ndim == 2:
+                action_mask = action_mask[:, None, :].expand(batch_size, self.action_horizon, -1)
+            actions = actions * action_mask
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
@@ -266,7 +284,11 @@ class FlowmatchingActionHead(nn.Module):
             )
             pred = self.action_decoder(model_output)
             pred_velocity = pred[:, -self.action_horizon :]
+            if action_mask is not None:
+                pred_velocity = pred_velocity * action_mask
             actions = actions + dt * pred_velocity
+            if action_mask is not None:
+                actions = actions * action_mask
         return actions
 
     @property

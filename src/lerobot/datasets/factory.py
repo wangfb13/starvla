@@ -303,7 +303,7 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
 
         action_shape = tuple(child_dataset.meta.features.get(ACTION, {}).get("shape", ()))
         canonical_action_dim = getattr(cfg.policy, "canonical_action_dim", None)
-        if cfg.policy.type in {"pi05", "pi05_full"} and action_shape == (canonical_action_dim,):
+        if cfg.policy.type in {"pi05", "pi05_full", "starvla_groot"} and action_shape == (canonical_action_dim,):
             if cfg.policy.type == "pi05_full":
                 from lerobot.policies.pi05_full.canonical_bimanual import canonical_action_feature_names
             else:
@@ -321,7 +321,7 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
 
         state_shape = tuple(child_dataset.meta.features.get("observation.state", {}).get("shape", ()))
         canonical_state_dim = getattr(cfg.policy, "canonical_state_dim", None)
-        if cfg.policy.type in {"pi05", "pi05_full"} and state_shape == (canonical_state_dim,):
+        if cfg.policy.type in {"pi05", "pi05_full", "starvla_groot"} and state_shape == (canonical_state_dim,):
             if cfg.policy.type == "pi05_full":
                 from lerobot.policies.pi05_full.canonical_bimanual import canonical_state_feature_names
             else:
@@ -474,7 +474,7 @@ def resolve_delta_timestamps(
     for key in feature_source:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        if key in (ACTION, ACTION + "_episode_ee", ACTION + "_absolute_ee") and action_delta_indices is not None:
+        if key == ACTION and action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in action_delta_indices]
         if key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]

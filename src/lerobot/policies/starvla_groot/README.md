@@ -35,17 +35,26 @@ Useful overrides:
 - `--policy.action_model_type=DiT-B|DiT-L`
 - `--policy.repeated_diffusion_steps=8` (noise samples per batch element)
 - `--policy.num_inference_timesteps=4` (denoising Euler steps at inference)
+- `--policy.use_state_input=true` (feed `observation.state` to the action head)
 - `--policy.wrist_only=true` (single-view) / `--policy.state_mode=none`
 - `--policy.train_expert_only=true` (freeze the VLM, train only the action head)
 - `--policy.freeze_vision_encoder=true`
+- `--policy.use_relative_actions=true` to train relative action targets with the
+  native LeRobot action/state processor; use
+  `--policy.relative_action_keyframes='["0:3","10:13"]'` for xyz+rot6d blocks.
+- `--policy.canonicalize_bimanual_rot6d=true` to reuse the PI0.5 bimanual
+  canonical representation: `left/right = xyz + rot6d(6) + gripper`.
+- `action_valid_mask` or `observation.action_mask` is used as the StarVLA action
+  loss mask when present in the batch.
 
 Migration notes:
 - `tactile_mode=none`, `tactile_mode=as_image`, and `tactile_mode=encode` are available.
 - `tactile_mode=encode` requires `--policy.tactile_encoder_path` pointing to a tactile-MAE
   checkpoint or converted HF-style directory.
-- `action_mode=joint` and `action_mode=relative_ee` are available. `relative_ee` requires
-  EE columns/stats such as `observation.state_episode_ee`, `action_episode_ee`, and
-  `action_relative_ee` in the dataset metadata/stat sidecar.
+- Control vectors are passed through unchanged: `state_mode=joint` keeps the raw
+  `observation.state`, and `action_mode=joint` trains/predicts the raw `action`.
+  Any flange/TCP conversion or robot-space mapping should stay in the existing
+  humanoid data/control pipeline.
 
 ## VLM / transformers compatibility
 The action head is VLM-agnostic; the backbone is loaded by

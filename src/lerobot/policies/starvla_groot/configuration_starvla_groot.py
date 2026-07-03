@@ -22,10 +22,10 @@ action head. Registered under the policy type ``"starvla_groot"``.
 from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.types import NormalizationMode
+from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
-from lerobot.utils.constants import ACTION
+from lerobot.utils.constants import ACTION, OBS_ACTION_MASK, OBS_STATE, OBS_STATE_MASK
 
 from ..sensor_routing import SensorRoutingMixin
 
@@ -78,6 +78,10 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     # Optional action/state dims. When None they are inferred from dataset features.
     action_dim: int | None = None
     state_dim: int | None = None
+    # Whether to feed observation.state into the GR00T action head. Matches PI0.5's
+    # use_state_input switch; relative/canonical processors may still use state even
+    # when the action head does not.
+    use_state_input: bool = True
 
     # === Multi-view / tactile / state routing ===
     # wrist_only / top_camera_keys / wrist_camera_keys / tactile_mode /
@@ -92,6 +96,24 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             "ACTION": NormalizationMode.MEAN_STD,
         }
     )
+
+    # Relative actions: reuse the native LeRobot processor. This is vector-level
+    # action/state conversion only; FK/IK and robot command conversion stay outside
+    # the StarVLA policy.
+    use_relative_actions: bool = False
+    relative_action_keyframes: list[str] = field(default_factory=list)
+    relative_exclude_keys: list[str] = field(default_factory=list)
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    action_feature_names: list[str] | None = None
+    state_feature_names: list[str] | None = None
+    source_action_feature_names: list[str] | None = None
+    source_state_feature_names: list[str] | None = None
+    canonicalize_bimanual_rot6d: bool = False
+    canonical_missing_value: float | None = 9930.0
+    canonical_action_dim: int = 20
+    canonical_state_dim: int = 22
+    action_mask_observation_key: str = OBS_ACTION_MASK
+    state_mask_observation_key: str = OBS_STATE_MASK
 
     # Training settings
     gradient_checkpointing: bool = False
@@ -131,15 +153,36 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             self.input_features = {}
         if self.output_features is None:
             self.output_features = {}
+        if self.state_mode == "none" and (self.use_relative_actions or self.canonicalize_bimanual_rot6d):
+            raise ValueError(
+                "StarvlaGroot requires state_mode='joint' when use_relative_actions "
+                "or canonicalize_bimanual_rot6d is enabled."
+            )
 
         empty_keys = tuple(self.add_empty_cameras(self.empty_cameras, self.image_resolution))
         self.prune_unselected_visual_features(extra_keep=empty_keys)
         self.apply_state_mode()  # real state dim is read from features by the policy
+        if not self.requires_state_feature:
+            self.input_features.pop(OBS_STATE, None)
         self.apply_action_mode()
         self.validate_routed_keys()
 
         if ACTION not in self.output_features:
             raise ValueError("StarvlaGroot requires an 'action' output feature.")
+        if self.canonicalize_bimanual_rot6d:
+            self.input_features[OBS_STATE] = PolicyFeature(
+                type=FeatureType.STATE,
+                shape=(self.canonical_state_dim,),
+            )
+            self.output_features[ACTION] = PolicyFeature(
+                type=FeatureType.ACTION,
+                shape=(self.canonical_action_dim,),
+            )
+        elif self.requires_state_feature and OBS_STATE not in self.input_features and self.state_dim is not None:
+            self.input_features[OBS_STATE] = PolicyFeature(
+                type=FeatureType.STATE,
+                shape=(int(self.state_dim),),
+            )
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
@@ -164,12 +207,14 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        # relative_ee predicts the future trajectory relative to the current observation, so the
-        # chunk starts at t+1 (k=0 would be the current pose => identity). Joint keeps the t convention.
-        if self.action_mode == "relative_ee":
-            return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:
         return None
+
+    @property
+    def requires_state_feature(self) -> bool:
+        return self.state_mode != "none" and (
+            self.use_state_input or self.use_relative_actions or self.canonicalize_bimanual_rot6d
+        )
