@@ -39,6 +39,7 @@ class Spark3PoseGripperConfig(RobotConfig):
     use_pi0_observation_state: bool = False
     joint_name_mapping: dict[str, str] = field(default_factory=default_joint_name_mapping)
     action_joint_names: list[str] = field(default_factory=list)
+    joint_command_names: list[str] = field(default_factory=list)
     end_effectors: dict[str, Spark3EndEffectorConfig] = field(default_factory=default_end_effectors)
     sensors: dict[str, Spark3ObservationTopicConfig] = field(default_factory=dict)
     # Default to the measured TCP v2 preset for new Spark pose/gripper configs.
@@ -61,6 +62,8 @@ class Spark3PoseGripperConfig(RobotConfig):
             raise ValueError(f"`command_mode` must be either 'pose' or 'joint', got {self.command_mode!r}.")
         if len(self.action_joint_names) != len(set(self.action_joint_names)):
             raise ValueError("`action_joint_names` must not contain duplicates.")
+        if len(self.joint_command_names) != len(set(self.joint_command_names)):
+            raise ValueError("`joint_command_names` must not contain duplicates.")
         for name, pose in {
             "default_left_arm_pose": self.default_left_arm_pose,
             "default_right_arm_pose": self.default_right_arm_pose,

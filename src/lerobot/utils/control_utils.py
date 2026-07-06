@@ -81,6 +81,45 @@ def is_headless():
         return True
 
 
+def _infer_expected_state_dim_from_policy(policy: PreTrainedPolicy) -> int | None:
+    config = getattr(policy, "config", None)
+    if config is None:
+        return None
+
+    input_features = getattr(config, "input_features", None) or {}
+    state_feature = input_features.get(OBS_STATE)
+    shape = getattr(state_feature, "shape", None)
+    if shape:
+        try:
+            return int(shape[0])
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    state_dim = getattr(config, "state_dim", None)
+    if state_dim is not None:
+        try:
+            return int(state_dim)
+        except (TypeError, ValueError):
+            pass
+
+    state_feature_names = list(getattr(config, "state_feature_names", None) or [])
+    if state_feature_names:
+        return len(state_feature_names)
+
+    source_state_feature_names = list(getattr(config, "source_state_feature_names", None) or [])
+    if source_state_feature_names:
+        return len(source_state_feature_names)
+
+    canonical_state_dim = getattr(config, "canonical_state_dim", None)
+    if canonical_state_dim is not None:
+        try:
+            return int(canonical_state_dim)
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
 def _get_cached_preprocessor_state(
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
 ) -> torch.Tensor | None:
@@ -544,6 +583,29 @@ def predict_action(
             policy_config=policy.config,
             robot_type=robot_type,
         ):
+            augment_observation_for_online_joint_sidecar(
+                observation=observation,
+                raw_observation=raw_observation,
+                policy_config=policy.config,
+            )
+            _ensure_online_sidecar_batch_dims(observation, policy)
+        expected_state_dim = _infer_expected_state_dim_from_policy(policy)
+        current_state_dim = None
+        if OBS_STATE in observation:
+            try:
+                current_state_dim = int(observation[OBS_STATE].shape[-1])
+            except (AttributeError, IndexError, TypeError, ValueError):
+                current_state_dim = None
+        if (
+            robot_type == "spark3_pose_gripper"
+            and expected_state_dim == 18
+            and current_state_dim not in {None, 18}
+        ):
+            logging.info(
+                "Forcing online joint-state adapter for spark3_pose_gripper because "
+                "prepared observation.state has dim=%s while policy expects dim=18.",
+                current_state_dim,
+            )
             augment_observation_for_online_joint_sidecar(
                 observation=observation,
                 raw_observation=raw_observation,

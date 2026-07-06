@@ -126,6 +126,8 @@ class Spark3EndEffectorConfig:
     dofs: int = 1
     source: str | None = None
     component_names: list[str] = field(default_factory=list)
+    command_min: float | None = None
+    command_max: float | None = None
 
     def __post_init__(self) -> None:
         if self.dofs < 1:
@@ -136,6 +138,12 @@ class Spark3EndEffectorConfig:
             raise ValueError(
                 f"`component_names` length ({len(self.component_names)}) must match `dofs` ({self.dofs})."
             )
+        if (
+            self.command_min is not None
+            and self.command_max is not None
+            and float(self.command_min) > float(self.command_max)
+        ):
+            raise ValueError("`command_min` must be <= `command_max` when both are provided.")
 
 
 @dataclass
@@ -182,12 +190,16 @@ def default_end_effectors() -> dict[str, Spark3EndEffectorConfig]:
             state_topic="/left_gripper_state",
             dofs=1,
             source="left",
+            command_min=0.0,
+            command_max=1.0,
         ),
         "main_gripper_right": Spark3EndEffectorConfig(
             command_topic="/right_gripper_command",
             state_topic="/right_gripper_state",
             dofs=1,
             source="right",
+            command_min=0.0,
+            command_max=1.0,
         ),
     }
 
@@ -414,6 +426,18 @@ def end_effector_values_from_action(
                 break
         values.append(float(value))
     return values
+
+
+def clamp_end_effector_values(
+    values: list[float] | tuple[float, ...],
+    config: Spark3EndEffectorConfig,
+) -> list[float]:
+    clipped = [float(value) for value in values]
+    if config.command_min is not None:
+        clipped = [max(float(config.command_min), value) for value in clipped]
+    if config.command_max is not None:
+        clipped = [min(float(config.command_max), value) for value in clipped]
+    return clipped
 
 
 def sensor_feature_names(name: str, config: Spark3ObservationTopicConfig) -> list[str]:

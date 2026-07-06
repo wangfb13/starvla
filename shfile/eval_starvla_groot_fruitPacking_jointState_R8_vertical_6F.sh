@@ -59,7 +59,7 @@ find_latest_pretrained_model() {
 }
 
 JOB_NAME="${JOB_NAME:-starvla_groot_sparky_fruitPacking_only_color_R8_vertical_6F}"
-POLICY_PATH="${1:-${POLICY_PATH:-}}"
+POLICY_PATH="${1:-${POLICY_PATH:-/home/dm/DM_das/outputs/starvla/starvla_sparky_fruitPacking_only_color_R8_vf6Easyundist_0705gap6/020000/pretrained_model}}"
 if [[ -z "${POLICY_PATH}" ]]; then
   POLICY_PATH="$(find_latest_pretrained_model "${ROOT_DIR}/outputs/${JOB_NAME}" || true)"
 fi
@@ -68,16 +68,19 @@ COMMAND_MODE="${COMMAND_MODE:-joint}"
 JOINT_COMMAND_TOPIC="${JOINT_COMMAND_TOPIC:-/joint_command_stream}"
 JOINT_STATE_TOPIC="${JOINT_STATE_TOPIC:-/joint_states}"
 ACTION_JOINT_NAMES="${ACTION_JOINT_NAMES:-[\"main_arm_left_1\",\"main_arm_left_2\",\"main_arm_left_3\",\"main_arm_left_4\",\"main_arm_left_5\",\"main_arm_left_6\",\"main_arm_left_7\",\"main_gripper_left\",\"main_arm_right_1\",\"main_arm_right_2\",\"main_arm_right_3\",\"main_arm_right_4\",\"main_arm_right_5\",\"main_arm_right_6\",\"main_arm_right_7\",\"main_gripper_right\"]}"
+JOINT_COMMAND_NAMES="${JOINT_COMMAND_NAMES:-[\"main_arm_right_1\",\"main_arm_right_2\",\"main_arm_right_3\",\"main_arm_right_4\",\"main_arm_right_5\",\"main_arm_right_6\",\"main_arm_right_7\",\"main_arm_left_1\",\"main_arm_left_2\",\"main_arm_left_3\",\"main_arm_left_4\",\"main_arm_left_5\",\"main_arm_left_6\",\"main_arm_left_7\",\"main_hip_yaw\",\"main_hip_pitch\",\"main_knee\",\"main_head_pitch\",\"main_head_yaw\"]}"
 
 LEFT_X5_IP="${LEFT_X5_IP:-192.168.9.10}"
 RIGHT_X5_IP="${RIGHT_X5_IP:-192.168.9.11}"
-INTRINSICS_PATH_LEFT="${INTRINSICS_PATH_LEFT:-${ROOT_DIR}/scripts/intrinsics_data/left_wirstFisheye_calibration.yaml}"
-INTRINSICS_PATH_RIGHT="${INTRINSICS_PATH_RIGHT:-${ROOT_DIR}/scripts/intrinsics_data/right_wirstFisheye_calibration.yaml}"
+ENABLE_UNDISTORT_CROP="${ENABLE_UNDISTORT_CROP:-true}"
+UNDISTORT_CROP_SIZE="${UNDISTORT_CROP_SIZE:-896}"
+INTRINSICS_PATH_LEFT="${INTRINSICS_PATH_LEFT:-/home/dm/DM_das/intrinsics_data/wrist_fishCamera_192_168_9_10.yaml}"
+INTRINSICS_PATH_RIGHT="${INTRINSICS_PATH_RIGHT:-/home/dm/DM_das/intrinsics_data/wrist_fishCamera_192_168_9_11.yaml}"
 
 RUN_TS="${RUN_TS:-$(date '+%Y%m%d_%H%M%S')}"
 POLICY_TAG="${POLICY_TAG:-$(basename "$(dirname "${POLICY_PATH:-unknown}")" 2>/dev/null || echo unknown)}"
 EVAL_NAME="${EVAL_NAME:-eval_${JOB_NAME}_joint_${POLICY_TAG}_${RUN_TS}}"
-DATASET_ROOT_BASE="${DATASET_ROOT_BASE:-/mnt/cpfs/datasets}"
+DATASET_ROOT_BASE="${DATASET_ROOT_BASE:-/home/dm/DM_das/datasets}"
 TASK_TEXT="${TASK_TEXT:-fruit packing}"
 NUM_EPISODES="${NUM_EPISODES:-10}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-600}"
@@ -85,6 +88,8 @@ RESET_TIME_S="${RESET_TIME_S:-5}"
 LEFT_GRIPPER_OFFSET="${LEFT_GRIPPER_OFFSET:-0.0}"
 RIGHT_GRIPPER_OFFSET="${RIGHT_GRIPPER_OFFSET:-0.0}"
 INTERPOLATION_MULTIPLIER="${INTERPOLATION_MULTIPLIER:-1}"
+ACTION_SKIP_START_STEPS="${ACTION_SKIP_START_STEPS:-0}"
+PLAY_SOUNDS="${PLAY_SOUNDS:-false}"
 
 if [[ ! -f "${INTRINSICS_PATH_LEFT}" ]]; then
   echo "[error] Missing intrinsics file: ${INTRINSICS_PATH_LEFT}"
@@ -111,7 +116,34 @@ echo "[info] command_mode=${COMMAND_MODE}"
 echo "[info] joint_command_topic=${JOINT_COMMAND_TOPIC}"
 echo "[info] joint_state_topic=${JOINT_STATE_TOPIC}"
 echo "[info] action_joint_names=${ACTION_JOINT_NAMES}"
+echo "[info] joint_command_names=${JOINT_COMMAND_NAMES}"
+echo "[info] enable_undistort_crop=${ENABLE_UNDISTORT_CROP}"
+echo "[info] undistort_crop_size=${UNDISTORT_CROP_SIZE}"
 echo "[info] task_text=${TASK_TEXT}"
+echo "[info] action_skip_start_steps=${ACTION_SKIP_START_STEPS}"
+echo "[info] python3=$(command -v python3)"
+
+EXPECTED_LEROBOT_SRC="${ROOT_DIR}/src"
+export EXPECTED_LEROBOT_SRC
+python3 - <<'PY'
+import inspect
+import os
+import sys
+
+expected = os.path.realpath(os.environ["EXPECTED_LEROBOT_SRC"])
+import lerobot
+
+lerobot_path = os.path.realpath(inspect.getsourcefile(lerobot) or "")
+print(f"[info] imported_lerobot={lerobot_path}")
+if not lerobot_path.startswith(expected + os.sep):
+    print(
+        f"[error] Imported lerobot is not from current repo.\n"
+        f"        expected prefix: {expected}\n"
+        f"        actual path:     {lerobot_path}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
 
 python3 "${ROOT_DIR}/src/lerobot/scripts/lerobot_record.py" \
   --robot.type=spark3_pose_gripper \
@@ -119,25 +151,31 @@ python3 "${ROOT_DIR}/src/lerobot/scripts/lerobot_record.py" \
   --robot.joint_command_topic="${JOINT_COMMAND_TOPIC}" \
   --robot.joint_state_topic="${JOINT_STATE_TOPIC}" \
   --robot.action_joint_names="${ACTION_JOINT_NAMES}" \
+  --robot.joint_command_names="${JOINT_COMMAND_NAMES}" \
   --robot.cameras='{
     "cam_right_wrist": {
       "type": "wirstFisheyeX5",
       "x5_ip": "'"${RIGHT_X5_IP}"'",
-      "width": 1920,
-      "height": 1080,
+      "width": '"${UNDISTORT_CROP_SIZE}"',
+      "height": '"${UNDISTORT_CROP_SIZE}"',
       "fps": 30,
-      "intrinsics_file": "'"${INTRINSICS_PATH_RIGHT}"'"
+      "intrinsics_file": "'"${INTRINSICS_PATH_RIGHT}"'",
+      "enable_undistort_crop": '"${ENABLE_UNDISTORT_CROP}"',
+      "undistort_crop_size": '"${UNDISTORT_CROP_SIZE}"'
     },
     "cam_left_wrist": {
       "type": "wirstFisheyeX5",
       "x5_ip": "'"${LEFT_X5_IP}"'",
-      "width": 1920,
-      "height": 1080,
+      "width": '"${UNDISTORT_CROP_SIZE}"',
+      "height": '"${UNDISTORT_CROP_SIZE}"',
       "fps": 30,
-      "intrinsics_file": "'"${INTRINSICS_PATH_LEFT}"'"
+      "intrinsics_file": "'"${INTRINSICS_PATH_LEFT}"'",
+      "enable_undistort_crop": '"${ENABLE_UNDISTORT_CROP}"',
+      "undistort_crop_size": '"${UNDISTORT_CROP_SIZE}"'
     }
   }' \
   --display_data=false \
+  --play_sounds="${PLAY_SOUNDS}" \
   --dataset.repo_id="/${EVAL_NAME}" \
   --dataset.root="${DATASET_ROOT_BASE}/${EVAL_NAME}" \
   --dataset.push_to_hub=false \
@@ -152,6 +190,7 @@ python3 "${ROOT_DIR}/src/lerobot/scripts/lerobot_record.py" \
   --policy.path="${POLICY_PATH}" \
   --policy.device=cuda \
   --policy.use_amp=true \
+  --policy.action_execution_skip_start_steps="${ACTION_SKIP_START_STEPS}" \
   --gripper_offsets.left="${LEFT_GRIPPER_OFFSET}" \
   --gripper_offsets.right="${RIGHT_GRIPPER_OFFSET}" \
   --interpolation_multiplier="${INTERPOLATION_MULTIPLIER}"

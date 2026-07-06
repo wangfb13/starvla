@@ -44,7 +44,12 @@ RIGHT_JOINT_STATE_NAMES = [f"arm_right_{idx}" for idx in range(1, 8)]
 LEFT_JOINT_FEATURE_NAMES = [f"main_arm_left_{idx}" for idx in range(1, 8)]
 RIGHT_JOINT_FEATURE_NAMES = [f"main_arm_right_{idx}" for idx in range(1, 8)]
 GRIPPER_FEATURE_NAMES = ["main_gripper_left", "main_gripper_right"]
-JOINT_STATE_FEATURE_NAMES = LEFT_JOINT_FEATURE_NAMES + RIGHT_JOINT_FEATURE_NAMES + GRIPPER_FEATURE_NAMES
+JOINT_STATE_FEATURE_NAMES = (
+    LEFT_JOINT_FEATURE_NAMES
+    + ["main_gripper_left"]
+    + RIGHT_JOINT_FEATURE_NAMES
+    + ["main_gripper_right"]
+)
 JOINT_ACTION_FEATURE_NAMES = list(JOINT_STATE_FEATURE_NAMES)
 STATE_PRESENCE_FEATURE_NAMES = ["left_arm_present", "right_arm_present"]
 LEFT_ARM_SLICE = slice(0, 8)

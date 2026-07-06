@@ -496,6 +496,11 @@ def _should_use_online_joint_sidecar_adapter(
         return False
     if getattr(policy_config, "canonicalize_bimanual_rot6d", False):
         return False
+    state_dim_matches = getattr(policy_config, "state_dim", -1) == 18
+    action_dim_matches = getattr(policy_config, "action_dim", -1) == 16
+    if action_dim_matches and state_dim_matches:
+        return True
+
     action_dim_matches = getattr(policy_config, "canonical_action_dim", -1) == 16
     state_dim_matches = getattr(policy_config, "canonical_state_dim", -1) == 18
     if action_dim_matches and state_dim_matches:
@@ -503,6 +508,10 @@ def _should_use_online_joint_sidecar_adapter(
 
     state_feature_names = list(getattr(policy_config, "state_feature_names", None) or [])
     action_feature_names = list(getattr(policy_config, "action_feature_names", None) or [])
+    if not state_feature_names:
+        state_feature_names = list(getattr(policy_config, "source_state_feature_names", None) or [])
+    if not action_feature_names:
+        action_feature_names = list(getattr(policy_config, "source_action_feature_names", None) or [])
     return (
         state_feature_names == SPARK3_JOINT_STATE_FEATURE_NAMES
         and action_feature_names == SPARK3_JOINT_ACTION_FEATURE_NAMES

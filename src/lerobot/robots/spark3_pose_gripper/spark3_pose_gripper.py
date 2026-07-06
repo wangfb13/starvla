@@ -19,8 +19,10 @@ from .schema import (
     action_feature_dict,
     base_twist_values_from_action,
     camera_feature_dict,
+    clamp_end_effector_values,
     default_action_dict,
     end_effector_dict,
+    end_effector_feature_names,
     end_effector_values_from_action,
     expand_depth_frame,
     filter_observation_state,
@@ -48,6 +50,7 @@ class _EndEffectorHandle:
         self.name = name
         self.config = config
         self.values = [0.0] * config.dofs
+        self.last_command_values = [0.0] * config.dofs
         self.ready = Event()
         self.publisher = None
         self.subscriber = None
@@ -65,6 +68,13 @@ class _EndEffectorHandle:
                 self.runtime.Float64MultiArray,
                 queue_size=5,
             )
+        logger.info(
+            "[spark3-gripper-connect] name=%s command_topic=%s state_topic=%s dofs=%s",
+            self.name,
+            self.config.command_topic,
+            self.config.state_topic,
+            self.config.dofs,
+        )
 
         if self.config.state_topic is None:
             self.ready.set()
@@ -87,6 +97,8 @@ class _EndEffectorHandle:
     def publish(self, values: list[float]) -> None:
         if self.publisher is None:
             raise RuntimeError(f"{self.name} publisher is not initialized.")
+        values = clamp_end_effector_values(values, self.config)
+        self.last_command_values = list(values)
         if self.config.dofs == 1:
             msg = self.runtime.Float64()
             msg.data = float(values[0])
@@ -97,6 +109,15 @@ class _EndEffectorHandle:
 
     def observation(self) -> dict[str, float]:
         return end_effector_dict(self.name, self.config, self.values)
+
+    def debug_snapshot(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "command_topic": self.config.command_topic,
+            "state_topic": self.config.state_topic,
+            "command_values": list(self.last_command_values),
+            "state_values": list(self.values),
+        }
 
     def disconnect(self) -> None:
         if self.subscriber is not None and hasattr(self.subscriber, "unregister"):
@@ -152,9 +173,12 @@ class Spark3PoseGripper(Robot):
         self._joint_names = ordered_joint_names(config.joint_name_mapping)
         self._action_joint_names = tuple(config.action_joint_names) if config.action_joint_names else self._joint_names
         self._end_effector_action_names = tuple(self.config.end_effectors.keys())
-        self._joint_command_names = tuple(
-            name for name in self._action_joint_names if name not in self._end_effector_action_names
-        )
+        if config.joint_command_names:
+            self._joint_command_names = tuple(config.joint_command_names)
+        else:
+            self._joint_command_names = tuple(
+                name for name in self._action_joint_names if name not in self._end_effector_action_names
+            )
         self._internal_to_ros_joint_names = self._build_internal_to_ros_joint_names()
         self._joint_positions = {joint_name: 0.0 for joint_name in self._joint_names}
         initial_pose_observation = default_action_dict(
@@ -435,6 +459,10 @@ class Spark3PoseGripper(Robot):
         ]
         return msg
 
+    @staticmethod
+    def _format_named_values(names: tuple[str, ...] | list[str], values: dict[str, float]) -> str:
+        return ", ".join(f"{name}={float(values[name]):.4f}" for name in names if name in values)
+
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         with self._state_lock:
@@ -486,6 +514,13 @@ class Spark3PoseGripper(Robot):
     def send_action(self, action: RobotAction) -> RobotAction:
         command = dict(self._last_action)
         command.update(action)
+        clamped_end_effector_values: dict[str, list[float]] = {}
+        for name, handle in self._end_effector_handles.items():
+            raw_values = end_effector_values_from_action(command, name, handle.config)
+            clamped_values = clamp_end_effector_values(raw_values, handle.config)
+            clamped_end_effector_values[name] = clamped_values
+            for feature_name, value in zip(end_effector_feature_names(name, handle.config), clamped_values, strict=True):
+                command[feature_name] = float(value)
 
         if self.config.command_mode == "pose":
             if self._wbc_goal_publisher is None:
@@ -508,24 +543,55 @@ class Spark3PoseGripper(Robot):
         else:
             if self._joint_command_publisher is None:
                 raise RuntimeError("Joint command publisher is not initialized.")
-            preview_joint_names = self._action_joint_names[:4]
-            preview = ", ".join(
-                f"{name}={command.get(name, self._joint_positions.get(name, 0.0)):.4f}"
-                for name in preview_joint_names
-            )
+            action_debug_values = {
+                joint_name: float(command.get(joint_name, self._joint_positions.get(joint_name, 0.0)))
+                for joint_name in self._action_joint_names
+            }
+            joint_command_msg = self._build_joint_command_message(command)
+            joint_command_debug_values = {
+                ros_joint_name: float(position)
+                for ros_joint_name, position in zip(joint_command_msg.name, joint_command_msg.position, strict=True)
+            }
             print(
-                "[spark3-send-action:joint] %s gripper=(%.4f, %.4f)"
-                % (
-                    preview,
-                    command.get("main_gripper_left", float("nan")),
-                    command.get("main_gripper_right", float("nan")),
-                ),
+                "[spark3-send-action:joint:action] %s"
+                % self._format_named_values(self._action_joint_names, action_debug_values),
                 flush=True,
             )
-            self._joint_command_publisher.publish(self._build_joint_command_message(command))
+            print(
+                "[spark3-send-action:joint:command] %s"
+                % self._format_named_values(joint_command_msg.name, joint_command_debug_values),
+                flush=True,
+            )
+            self._joint_command_publisher.publish(joint_command_msg)
 
         for name, handle in self._end_effector_handles.items():
-            handle.publish(end_effector_values_from_action(command, name, handle.config))
+            handle.publish(clamped_end_effector_values[name])
+
+        if self._end_effector_handles:
+            gripper_debug = []
+            for handle in self._end_effector_handles.values():
+                snapshot = handle.debug_snapshot()
+                if len(snapshot["command_values"]) == 1 and len(snapshot["state_values"]) == 1:
+                    gripper_debug.append(
+                        "%s topic=%s cmd=%.4f state=%.4f"
+                        % (
+                            snapshot["name"],
+                            snapshot["command_topic"],
+                            float(snapshot["command_values"][0]),
+                            float(snapshot["state_values"][0]),
+                        )
+                    )
+                else:
+                    gripper_debug.append(
+                        "%s topic=%s cmd=%s state=%s"
+                        % (
+                            snapshot["name"],
+                            snapshot["command_topic"],
+                            snapshot["command_values"],
+                            snapshot["state_values"],
+                        )
+                    )
+            print("[spark3-send-action:gripper] %s" % " | ".join(gripper_debug), flush=True)
 
         self._last_action = command
         return command

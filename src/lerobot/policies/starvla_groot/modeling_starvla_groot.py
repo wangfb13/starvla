@@ -339,6 +339,9 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
         self.eval()
         if len(self._action_queue) == 0:
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
+            skip_start_steps = max(0, int(getattr(self.config, "action_execution_skip_start_steps", 0)))
+            if skip_start_steps:
+                actions = actions[:, skip_start_steps:]
             # (B, n_action_steps, action_dim) -> queue of (B, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()
