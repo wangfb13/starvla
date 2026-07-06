@@ -11,6 +11,8 @@
 # overwatch logger, the fast-token vocabulary, or CoT prompt templating.
 
 import logging
+import os
+import sys
 from typing import List
 
 import torch
@@ -18,6 +20,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+
+def _patch_transformers_causal_conv1d_probe() -> None:
+    """Avoid importing an incompatible causal_conv1d CUDA extension.
+
+    Some environments expose the ``causal_conv1d`` package name but the binary
+    extension cannot actually be loaded because of a glibc mismatch. The stock
+    Transformers availability check only verifies package presence, so Qwen3.5
+    tries to import the broken extension and crashes during model load.
+
+    We patch the probe to enable the fast path only when the extension can be
+    imported successfully in the current process.
+    """
+    import transformers.utils.import_utils as hf_import_utils
+
+    if getattr(hf_import_utils, "_lerobot_safe_causal_conv1d_probe", False):
+        return
+
+    def _safe_is_causal_conv1d_available() -> bool:
+        if not hf_import_utils.is_torch_cuda_available():
+            return False
+        try:
+            import causal_conv1d  # noqa: F401
+        except Exception as exc:
+            logger.warning("causal_conv1d is installed but unusable, disabling fast path: %s", exc)
+            return False
+        return True
+
+    hf_import_utils.is_causal_conv1d_available = _safe_is_causal_conv1d_available
+    hf_import_utils._lerobot_safe_causal_conv1d_probe = True
+
+    # If a previous failed import left behind a partial module entry, clear it so
+    # the next import picks up the patched availability probe.
+    sys.modules.pop("transformers.models.qwen3_5.modeling_qwen3_5", None)
 
 
 def _smart_resize(height: int, width: int, factor: int, min_pixels: int, max_pixels: int) -> tuple[int, int]:
@@ -62,6 +98,9 @@ class QwenVLInterface(nn.Module):
         image_resolution: tuple[int, int] = (224, 224),
     ):
         super().__init__()
+
+        if os.environ.get("LEROBOT_ENABLE_UNSAFE_CAUSAL_CONV1D", "0") != "1":
+            _patch_transformers_causal_conv1d_probe()
 
         from transformers import AutoModelForImageTextToText, AutoProcessor
 

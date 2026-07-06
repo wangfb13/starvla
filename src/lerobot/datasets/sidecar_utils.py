@@ -355,6 +355,7 @@ class FramewiseSidecar:
         self._default_values: dict[str, object] = {}
         self._vector_dims: dict[str, int] = {}
         self._vector_stats: dict[str, dict[str, np.ndarray]] = {}
+        self._summary: dict[str, Any] = {}
 
     @property
     def default_values(self) -> dict[str, object]:
@@ -371,6 +372,16 @@ class FramewiseSidecar:
         if not self.path.exists():
             LOGGER.warning("Sidecar path for %s does not exist: %s", self.repo_id, self.path)
             return
+
+        summary_path = self.path.parent / "summary.json"
+        if summary_path.exists():
+            try:
+                with summary_path.open("r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict):
+                    self._summary = payload
+            except Exception:
+                LOGGER.warning("Failed to load sidecar summary metadata for %s: %s", self.repo_id, summary_path)
 
         sidecar_df = pd.read_parquet(self.path)
         if "index" not in sidecar_df.columns:
@@ -636,6 +647,20 @@ class FramewiseSidecar:
             rows.append(materialized.to(dtype=torch.float32).reshape(-1))
         return torch.stack(rows, dim=0)
 
+    def feature_names(self, key: str) -> list[str] | None:
+        self.ensure_loaded()
+        if not self._summary:
+            return None
+        if key == OBS_STATE:
+            names = self._summary.get("state_feature_names")
+        elif key == ACTION:
+            names = self._summary.get("action_feature_names")
+        else:
+            names = None
+        if not isinstance(names, list):
+            return None
+        return [str(name) for name in names]
+
 
 def apply_canonical_sidecar_feature_overrides(features: dict[str, dict], sidecar: FramewiseSidecar) -> dict[str, dict]:
     updated = dict(features)
@@ -644,7 +669,13 @@ def apply_canonical_sidecar_feature_overrides(features: dict[str, dict], sidecar
     if state_dim is not None and "observation.state" in updated:
         updated["observation.state"] = dict(updated["observation.state"])
         updated["observation.state"]["shape"] = (state_dim,)
+        state_names = sidecar.feature_names(OBS_STATE)
+        if state_names is not None and len(state_names) == state_dim:
+            updated["observation.state"]["names"] = state_names
     if action_dim is not None and ACTION in updated:
         updated[ACTION] = dict(updated[ACTION])
         updated[ACTION]["shape"] = (action_dim,)
+        action_names = sidecar.feature_names(ACTION)
+        if action_names is not None and len(action_names) == action_dim:
+            updated[ACTION]["names"] = action_names
     return updated

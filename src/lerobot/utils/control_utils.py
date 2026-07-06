@@ -32,7 +32,9 @@ import torch
 from deepdiff import DeepDiff
 
 from lerobot.async_inference.helpers import (
+    augment_observation_for_online_joint_sidecar,
     augment_observation_for_online_pi05_full_sidecar,
+    should_use_online_joint_sidecar_adapter,
     should_use_online_pi05_full_sidecar_adapter,
 )
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -195,7 +197,7 @@ def _maybe_convert_pi05_canonical_action_to_robot_action(
     robot_action = _build_spark3_default_action_from_observation(raw_observation)
     robot_action.update(converted_action)
     print(
-        "[pi05-action-debug] arm_valid=%s updated_keys=%s left=%s right=%s gripper=(%.4f, %.4f)"
+        "[canonical-action-debug] arm_valid=%s updated_keys=%s left=%s right=%s gripper=(%.4f, %.4f)"
         % (
             arm_valid,
             sorted(converted_action.keys()),
@@ -532,6 +534,17 @@ def predict_action(
             robot_type=robot_type,
         ):
             augment_observation_for_online_pi05_full_sidecar(
+                observation=observation,
+                raw_observation=raw_observation,
+                policy_config=policy.config,
+            )
+            _ensure_online_sidecar_batch_dims(observation, policy)
+        elif should_use_online_joint_sidecar_adapter(
+            policy_type=policy.name,
+            policy_config=policy.config,
+            robot_type=robot_type,
+        ):
+            augment_observation_for_online_joint_sidecar(
                 observation=observation,
                 raw_observation=raw_observation,
                 policy_config=policy.config,

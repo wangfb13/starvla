@@ -17,6 +17,7 @@ class Spark3RosRuntime:
     UInt16: type
     UInt16MultiArray: type
     Header: type
+    JointState: type
     Point: type
     Quaternion: type
     PoseStamped: type
@@ -29,7 +30,7 @@ def load_ros_runtime() -> Spark3RosRuntime:
     try:
         import rospy
         from geometry_msgs.msg import Point, PoseStamped, Quaternion
-        from sensor_msgs.msg import JointState  # noqa: F401
+        from sensor_msgs.msg import JointState
         from std_msgs.msg import Float64, Float64MultiArray, Header, UInt16, UInt16MultiArray
         from wbc_msgs.msg import wbc_pose_ee, wbc_pose_expand, wbc_state
     except ImportError as e:
@@ -45,6 +46,7 @@ def load_ros_runtime() -> Spark3RosRuntime:
         UInt16=UInt16,
         UInt16MultiArray=UInt16MultiArray,
         Header=Header,
+        JointState=JointState,
         Point=Point,
         Quaternion=Quaternion,
         PoseStamped=PoseStamped,

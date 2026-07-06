@@ -1,0 +1,1 @@
+/mnt/tacumi_data/lerobot_datasetV30_train_ready/sparky_ugripper/sparky_ugripper_fruit_packing_v2gripper_R8_vertical_6F_144_v30_tcp_undist_train_ready

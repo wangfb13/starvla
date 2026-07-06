@@ -5,6 +5,7 @@ export TRANSFORMERS_OFFLINE=1
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 export LEROBOT_EVAL_LEFT_ARM_PRESENT=0
 export LEROBOT_EVAL_RIGHT_ARM_PRESENT=1
+COMMAND_MODE="${COMMAND_MODE:-pose}"
 
 REPO_ROOT="/home/dm/DM_das/lerobot-v0.5.1"
 # PALIGEMMA_PATH="/home/dm/DM_das/checkpoints/paligemma/paligemma-3b-pt-224"
@@ -28,6 +29,7 @@ fi
 
 python "${REPO_ROOT}/src/lerobot/scripts/lerobot_record.py" \
   --robot.type=spark3_pose_gripper \
+  --robot.command_mode="${COMMAND_MODE}" \
   --robot.cameras='{
     "cam_right_wrist": {
       "type": "wirstFisheyeX5",

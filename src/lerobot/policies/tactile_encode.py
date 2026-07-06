@@ -32,8 +32,6 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from lerobot.tac_encoder.tactile_mae.inference import TactileMAEFeatureExtractor
-
 
 class TactileEncoder(nn.Module):
     """Tactile-MAE query-token encoder + projection that yields tactile tokens.
@@ -52,6 +50,14 @@ class TactileEncoder(nn.Module):
             raise ValueError(
                 "TactileEncoder requires tactile_mode='encode' with non-empty tactile_keys."
             )
+
+        try:
+            from lerobot.tac_encoder.tactile_mae.inference import TactileMAEFeatureExtractor
+        except ImportError as exc:
+            raise ImportError(
+                "Failed to import tactile-MAE dependencies required by tactile_mode='encode'. "
+                "If you are not using tactile inputs, keep tactile_mode='none'."
+            ) from exc
 
         self.extractor = TactileMAEFeatureExtractor.from_pretrained(
             config.tactile_encoder_path,

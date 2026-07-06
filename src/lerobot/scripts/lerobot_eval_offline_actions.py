@@ -79,6 +79,21 @@ def _normalize_mask(mask: torch.Tensor | None, like: torch.Tensor) -> torch.Tens
     return mask.expand_as(like)
 
 
+def _get_action_mask(policy, batch: dict[str, Any], like: torch.Tensor) -> torch.Tensor | None:
+    """Best-effort action-mask extraction across policy implementations."""
+    if hasattr(policy, "prepare_action_mask"):
+        return policy.prepare_action_mask(batch)
+
+    if hasattr(policy, "_prepare_action_mask"):
+        return policy._prepare_action_mask(batch, like.device, like.dtype)
+
+    action_mask_key = getattr(getattr(policy, "config", None), "action_mask_observation_key", OBS_ACTION_MASK)
+    mask = batch.get(action_mask_key, batch.get(OBS_ACTION_MASK))
+    if mask is None:
+        mask = batch.get("action_valid_mask")
+    return mask
+
+
 @dataclass
 class ErrorStats:
     sum_abs: float = 0.0
@@ -263,7 +278,7 @@ def main() -> None:
             gt_chunk_model = processed_batch[ACTION]
             pred_chunk_model = policy.predict_action_chunk(processed_batch)
 
-            chunk_mask = _normalize_mask(policy.prepare_action_mask(processed_batch), gt_chunk_model)
+            chunk_mask = _normalize_mask(_get_action_mask(policy, processed_batch, gt_chunk_model), gt_chunk_model)
             model_chunk_stats.update(pred_chunk_model, gt_chunk_model, chunk_mask)
 
             gt_chunk_absolute = postprocessor(gt_chunk_model.clone())
@@ -276,7 +291,7 @@ def main() -> None:
 
             pred_step_model = policy.select_action(processed_batch)
             gt_step_model = gt_chunk_model[:, 0, :]
-            step_mask = _normalize_mask(policy.prepare_action_mask(processed_batch), gt_step_model)
+            step_mask = _normalize_mask(_get_action_mask(policy, processed_batch, gt_step_model), gt_step_model)
             model_step_stats.update(pred_step_model, gt_step_model, step_mask)
 
             gt_step_absolute = gt_chunk_absolute[:, 0, :]

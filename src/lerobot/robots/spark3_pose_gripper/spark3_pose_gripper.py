@@ -24,6 +24,7 @@ from .schema import (
     end_effector_values_from_action,
     expand_depth_frame,
     filter_observation_state,
+    joint_action_feature_dict,
     observation_feature_dict,
     ordered_joint_names,
     parse_joint_state_message,
@@ -149,6 +150,12 @@ class Spark3PoseGripper(Robot):
         self.config = config
         self.cameras = make_cameras_from_configs(config.cameras)
         self._joint_names = ordered_joint_names(config.joint_name_mapping)
+        self._action_joint_names = tuple(config.action_joint_names) if config.action_joint_names else self._joint_names
+        self._end_effector_action_names = tuple(self.config.end_effectors.keys())
+        self._joint_command_names = tuple(
+            name for name in self._action_joint_names if name not in self._end_effector_action_names
+        )
+        self._internal_to_ros_joint_names = self._build_internal_to_ros_joint_names()
         self._joint_positions = {joint_name: 0.0 for joint_name in self._joint_names}
         initial_pose_observation = default_action_dict(
             {},
@@ -205,12 +212,14 @@ class Spark3PoseGripper(Robot):
                 ),
             )
         )
+        self._last_action.update({joint_name: 0.0 for joint_name in self._action_joint_names})
         self._is_connected = False
         self._state_ready = Event()
         self._joint_ready = Event()
         self._state_lock = Lock()
         self._ros: Spark3RosRuntime | None = None
         self._wbc_goal_publisher = None
+        self._joint_command_publisher = None
         self._pose_subscriber = None
         self._joint_subscriber = None
         self._end_effector_handles: dict[str, _EndEffectorHandle] = {}
@@ -228,6 +237,8 @@ class Spark3PoseGripper(Robot):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
+        if self.config.command_mode == "joint":
+            return joint_action_feature_dict(self._action_joint_names, self.config.end_effectors)
         return action_feature_dict(self.config.end_effectors)
 
     @property
@@ -251,22 +262,27 @@ class Spark3PoseGripper(Robot):
             self._ros = load_ros_runtime()
             ensure_ros_node(self._ros, self.config.ros_node_name)
 
-            self._wbc_goal_publisher = self._ros.rospy.Publisher(
-                self.config.command_topic,
-                self._ros.WbcPoseExpand,
-                queue_size=5,
-            )
+            if self.config.command_mode == "pose":
+                self._wbc_goal_publisher = self._ros.rospy.Publisher(
+                    self.config.command_topic,
+                    self._ros.WbcPoseExpand,
+                    queue_size=5,
+                )
+            else:
+                self._joint_command_publisher = self._ros.rospy.Publisher(
+                    self.config.joint_command_topic,
+                    self._ros.JointState,
+                    queue_size=5,
+                )
             self._pose_subscriber = self._ros.rospy.Subscriber(
                 self.config.state_topic,
                 self._ros.WbcState,
                 self._handle_pose_state,
             )
 
-            from sensor_msgs.msg import JointState
-
             self._joint_subscriber = self._ros.rospy.Subscriber(
                 self.config.joint_state_topic,
-                JointState,
+                self._ros.JointState,
                 self._handle_joint_state,
             )
 
@@ -363,6 +379,20 @@ class Spark3PoseGripper(Robot):
         pose_stamped.pose.orientation = self._ros.Quaternion(*pose_values[3:])
         return pose_stamped
 
+    def _build_internal_to_ros_joint_names(self) -> dict[str, str]:
+        ros_to_internal = self.config.joint_name_mapping
+        internal_to_ros: dict[str, str] = {}
+        for ros_name, internal_name in ros_to_internal.items():
+            internal_to_ros.setdefault(internal_name, ros_name)
+        return internal_to_ros
+
+    def _infer_ros_joint_name(self, internal_joint_name: str) -> str:
+        if internal_joint_name in self._internal_to_ros_joint_names:
+            return self._internal_to_ros_joint_names[internal_joint_name]
+        if internal_joint_name.startswith("main_"):
+            return f"{internal_joint_name.removeprefix('main_')}_joint"
+        return internal_joint_name
+
     def _build_command_message(self, action: RobotAction) -> Any:
         if self._ros is None:
             raise RuntimeError("ROS runtime is not initialized.")
@@ -393,6 +423,18 @@ class Spark3PoseGripper(Robot):
         msg.pose_selection = int(self.config.pose_selection)
         return msg
 
+    def _build_joint_command_message(self, action: RobotAction) -> Any:
+        if self._ros is None:
+            raise RuntimeError("ROS runtime is not initialized.")
+        msg = self._ros.JointState()
+        msg.header = self._ros.Header(stamp=self._ros.rospy.Time.now(), frame_id="")
+        msg.name = [self._infer_ros_joint_name(joint_name) for joint_name in self._joint_command_names]
+        msg.position = [
+            float(action.get(joint_name, self._joint_positions.get(joint_name, 0.0)))
+            for joint_name in self._joint_command_names
+        ]
+        return msg
+
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         with self._state_lock:
@@ -401,6 +443,9 @@ class Spark3PoseGripper(Robot):
 
         for joint_name in self._joint_names:
             obs[joint_name] = float(joint_positions.get(joint_name, 0.0))
+
+        obs["left_arm_present"] = 1.0
+        obs["right_arm_present"] = 1.0
 
         for handle in self._end_effector_handles.values():
             obs.update(handle.observation())
@@ -439,26 +484,45 @@ class Spark3PoseGripper(Robot):
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
-        if self._wbc_goal_publisher is None:
-            raise RuntimeError("WBC goal publisher is not initialized.")
-
         command = dict(self._last_action)
         command.update(action)
-        print(
-            "[spark3-send-action] left=(%.4f, %.4f, %.4f) right=(%.4f, %.4f, %.4f) gripper=(%.4f, %.4f)"
-            % (
-                command.get("main_left_x", float("nan")),
-                command.get("main_left_y", float("nan")),
-                command.get("main_left_z", float("nan")),
-                command.get("main_right_x", float("nan")),
-                command.get("main_right_y", float("nan")),
-                command.get("main_right_z", float("nan")),
-                command.get("main_gripper_left", float("nan")),
-                command.get("main_gripper_right", float("nan")),
-            ),
-            flush=True,
-        )
-        self._wbc_goal_publisher.publish(self._build_command_message(command))
+
+        if self.config.command_mode == "pose":
+            if self._wbc_goal_publisher is None:
+                raise RuntimeError("WBC goal publisher is not initialized.")
+            print(
+                "[spark3-send-action:pose] left=(%.4f, %.4f, %.4f) right=(%.4f, %.4f, %.4f) gripper=(%.4f, %.4f)"
+                % (
+                    command.get("main_left_x", float("nan")),
+                    command.get("main_left_y", float("nan")),
+                    command.get("main_left_z", float("nan")),
+                    command.get("main_right_x", float("nan")),
+                    command.get("main_right_y", float("nan")),
+                    command.get("main_right_z", float("nan")),
+                    command.get("main_gripper_left", float("nan")),
+                    command.get("main_gripper_right", float("nan")),
+                ),
+                flush=True,
+            )
+            self._wbc_goal_publisher.publish(self._build_command_message(command))
+        else:
+            if self._joint_command_publisher is None:
+                raise RuntimeError("Joint command publisher is not initialized.")
+            preview_joint_names = self._action_joint_names[:4]
+            preview = ", ".join(
+                f"{name}={command.get(name, self._joint_positions.get(name, 0.0)):.4f}"
+                for name in preview_joint_names
+            )
+            print(
+                "[spark3-send-action:joint] %s gripper=(%.4f, %.4f)"
+                % (
+                    preview,
+                    command.get("main_gripper_left", float("nan")),
+                    command.get("main_gripper_right", float("nan")),
+                ),
+                flush=True,
+            )
+            self._joint_command_publisher.publish(self._build_joint_command_message(command))
 
         for name, handle in self._end_effector_handles.items():
             handle.publish(end_effector_values_from_action(command, name, handle.config))
@@ -485,6 +549,8 @@ class Spark3PoseGripper(Robot):
             self._joint_subscriber.unregister()
         if self._wbc_goal_publisher is not None and hasattr(self._wbc_goal_publisher, "unregister"):
             self._wbc_goal_publisher.unregister()
+        if self._joint_command_publisher is not None and hasattr(self._joint_command_publisher, "unregister"):
+            self._joint_command_publisher.unregister()
 
         for camera in self.cameras.values():
             camera.disconnect()
@@ -492,6 +558,7 @@ class Spark3PoseGripper(Robot):
         self._pose_subscriber = None
         self._joint_subscriber = None
         self._wbc_goal_publisher = None
+        self._joint_command_publisher = None
         self._state_ready.clear()
         self._joint_ready.clear()
         self._is_connected = False

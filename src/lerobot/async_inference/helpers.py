@@ -79,6 +79,20 @@ SPARK3_ARM_KEYS = {
     ),
 }
 SPARK3_GRIPPER_KEYS = {"left": "main_gripper_left", "right": "main_gripper_right"}
+SPARK3_JOINT_KEYS = {
+    "left": tuple(f"main_arm_left_{idx}" for idx in range(1, 8)),
+    "right": tuple(f"main_arm_right_{idx}" for idx in range(1, 8)),
+}
+SPARK3_ARM_PRESENT_KEYS = {"left": "left_arm_present", "right": "right_arm_present"}
+SPARK3_JOINT_STATE_FEATURE_NAMES = [
+    *SPARK3_JOINT_KEYS["left"],
+    SPARK3_GRIPPER_KEYS["left"],
+    *SPARK3_JOINT_KEYS["right"],
+    SPARK3_GRIPPER_KEYS["right"],
+    SPARK3_ARM_PRESENT_KEYS["left"],
+    SPARK3_ARM_PRESENT_KEYS["right"],
+]
+SPARK3_JOINT_ACTION_FEATURE_NAMES = SPARK3_JOINT_STATE_FEATURE_NAMES[:16]
 TACTILE_SLOT_SUFFIX_TO_INDEX = {
     "tactile_left_left": 0,
     "tactile_left_right": 1,
@@ -350,13 +364,111 @@ def _build_spark3_online_pi05_state_and_masks(
     }
 
 
+def _build_spark3_online_joint_state_and_masks(
+    raw_observation: RawObservation,
+    *,
+    action_mask_key: str,
+    state_mask_key: str,
+) -> dict[str, torch.Tensor]:
+    state_segments: list[torch.Tensor] = []
+    state_masks: list[torch.Tensor] = []
+    action_masks: list[torch.Tensor] = []
+    arm_present_values: list[float] = []
+
+    explicit_arm_present = _extract_optional_arm_present(raw_observation)
+    explicit_state_mask = _extract_optional_mask(
+        raw_observation,
+        (state_mask_key, "state_mask", OBS_STATE_MASK),
+        18,
+    )
+    explicit_action_mask = _extract_optional_mask(
+        raw_observation,
+        (action_mask_key, "action_valid_mask", OBS_ACTION_MASK),
+        16,
+    )
+
+    for arm in ("left", "right"):
+        joint_values = []
+        joint_valid_flags = []
+        for key in SPARK3_JOINT_KEYS[arm]:
+            valid = key in raw_observation and _is_finite_scalar(raw_observation[key])
+            joint_valid_flags.append(valid)
+            joint_values.append(float(raw_observation[key]) if valid else 0.0)
+
+        grip_key = SPARK3_GRIPPER_KEYS[arm]
+        grip_valid = grip_key in raw_observation and _is_finite_scalar(raw_observation[grip_key])
+        grip_value = float(raw_observation[grip_key]) if grip_valid else 0.0
+
+        state_arm = torch.tensor([*joint_values, grip_value], dtype=torch.float32)
+        state_mask_arm = torch.tensor(
+            [*(1.0 if valid else 0.0 for valid in joint_valid_flags), 1.0 if grip_valid else 0.0],
+            dtype=torch.float32,
+        )
+        action_mask_arm = state_mask_arm.clone()
+
+        arm_present = bool(state_mask_arm.min().item() > 0.5)
+        present_key = SPARK3_ARM_PRESENT_KEYS[arm]
+        if present_key in raw_observation and _is_finite_scalar(raw_observation[present_key]):
+            arm_present = bool(float(raw_observation[present_key]) > 0.5)
+        if explicit_arm_present is not None:
+            arm_present = bool(explicit_arm_present[arm])
+        if not arm_present:
+            state_mask_arm.zero_()
+            action_mask_arm.zero_()
+
+        state_segments.append(state_arm)
+        state_masks.append(state_mask_arm)
+        action_masks.append(action_mask_arm)
+        arm_present_values.append(1.0 if arm_present else 0.0)
+
+    state = torch.cat(
+        (
+            torch.cat(state_segments, dim=0),
+            torch.tensor(arm_present_values, dtype=torch.float32),
+        ),
+        dim=0,
+    )
+    state_mask = torch.cat(
+        (
+            torch.cat(state_masks, dim=0),
+            torch.ones(2, dtype=torch.float32),
+        ),
+        dim=0,
+    )
+    action_mask = torch.cat(action_masks, dim=0)
+
+    if explicit_state_mask is not None:
+        if explicit_state_mask.numel() < 18:
+            pad = torch.ones(18 - explicit_state_mask.numel(), dtype=torch.float32)
+            state_mask = torch.cat((explicit_state_mask.to(dtype=torch.float32), pad), dim=0)
+        else:
+            state_mask = explicit_state_mask[:18].to(dtype=torch.float32)
+        if explicit_arm_present is None:
+            arm_present_values = [
+                1.0 if float(state_mask[:8].min()) > 0.5 else 0.0,
+                1.0 if float(state_mask[8:16].min()) > 0.5 else 0.0,
+            ]
+            state[-2:] = torch.tensor(arm_present_values, dtype=torch.float32)
+
+    if explicit_action_mask is not None:
+        action_mask = explicit_action_mask[:16].to(dtype=torch.float32)
+
+    return {
+        OBS_STATE: state,
+        state_mask_key: state_mask,
+        action_mask_key: action_mask,
+        OBS_STATE_MASK: state_mask,
+        OBS_ACTION_MASK: action_mask,
+    }
+
+
 def _should_use_online_pi05_full_sidecar_adapter(
     *,
     policy_type: str | None,
     policy_config: Any | None,
     robot_type: str | None,
 ) -> bool:
-    if policy_type != "pi05_full":
+    if policy_type not in {"pi05", "pi05_full", "starvla_groot"}:
         return False
     if robot_type != "spark3_pose_gripper":
         return False
@@ -370,6 +482,33 @@ def _should_use_online_pi05_full_sidecar_adapter(
     )
 
 
+def _should_use_online_joint_sidecar_adapter(
+    *,
+    policy_type: str | None,
+    policy_config: Any | None,
+    robot_type: str | None,
+) -> bool:
+    if policy_type not in {"pi05", "pi05_full", "starvla_groot"}:
+        return False
+    if robot_type != "spark3_pose_gripper":
+        return False
+    if policy_config is None:
+        return False
+    if getattr(policy_config, "canonicalize_bimanual_rot6d", False):
+        return False
+    action_dim_matches = getattr(policy_config, "canonical_action_dim", -1) == 16
+    state_dim_matches = getattr(policy_config, "canonical_state_dim", -1) == 18
+    if action_dim_matches and state_dim_matches:
+        return True
+
+    state_feature_names = list(getattr(policy_config, "state_feature_names", None) or [])
+    action_feature_names = list(getattr(policy_config, "action_feature_names", None) or [])
+    return (
+        state_feature_names == SPARK3_JOINT_STATE_FEATURE_NAMES
+        and action_feature_names == SPARK3_JOINT_ACTION_FEATURE_NAMES
+    )
+
+
 def should_use_online_pi05_full_sidecar_adapter(
     *,
     policy_type: str | None,
@@ -377,6 +516,19 @@ def should_use_online_pi05_full_sidecar_adapter(
     robot_type: str | None,
 ) -> bool:
     return _should_use_online_pi05_full_sidecar_adapter(
+        policy_type=policy_type,
+        policy_config=policy_config,
+        robot_type=robot_type,
+    )
+
+
+def should_use_online_joint_sidecar_adapter(
+    *,
+    policy_type: str | None,
+    policy_config: Any | None,
+    robot_type: str | None,
+) -> bool:
+    return _should_use_online_joint_sidecar_adapter(
         policy_type=policy_type,
         policy_config=policy_config,
         robot_type=robot_type,
@@ -432,6 +584,23 @@ def _augment_observation_for_online_pi05_full_sidecar(
         observation[tactile_slot_present_key] = slot_present
 
 
+def _augment_observation_for_online_joint_sidecar(
+    *,
+    observation: Observation,
+    raw_observation: RawObservation,
+    policy_config: Any,
+) -> None:
+    action_mask_key = getattr(policy_config, "action_mask_observation_key", OBS_ACTION_MASK)
+    state_mask_key = getattr(policy_config, "state_mask_observation_key", OBS_STATE_MASK)
+    observation.update(
+        _build_spark3_online_joint_state_and_masks(
+            raw_observation,
+            action_mask_key=action_mask_key,
+            state_mask_key=state_mask_key,
+        )
+    )
+
+
 def augment_observation_for_online_pi05_full_sidecar(
     *,
     observation: Observation,
@@ -439,6 +608,19 @@ def augment_observation_for_online_pi05_full_sidecar(
     policy_config: Any,
 ) -> None:
     _augment_observation_for_online_pi05_full_sidecar(
+        observation=observation,
+        raw_observation=raw_observation,
+        policy_config=policy_config,
+    )
+
+
+def augment_observation_for_online_joint_sidecar(
+    *,
+    observation: Observation,
+    raw_observation: RawObservation,
+    policy_config: Any,
+) -> None:
+    _augment_observation_for_online_joint_sidecar(
         observation=observation,
         raw_observation=raw_observation,
         policy_config=policy_config,
@@ -464,6 +646,16 @@ def raw_observation_to_observation(
         robot_type=robot_type,
     ):
         _augment_observation_for_online_pi05_full_sidecar(
+            observation=observation,
+            raw_observation=raw_observation,
+            policy_config=policy_config,
+        )
+    elif _should_use_online_joint_sidecar_adapter(
+        policy_type=policy_type,
+        policy_config=policy_config,
+        robot_type=robot_type,
+    ):
+        _augment_observation_for_online_joint_sidecar(
             observation=observation,
             raw_observation=raw_observation,
             policy_config=policy_config,
@@ -563,7 +755,7 @@ def maybe_convert_pi05_canonical_action_chunk_to_robot_actions(
     canonical_state: torch.Tensor | None = None,
     action_mask: torch.Tensor | None = None,
 ) -> list[dict[str, float]] | None:
-    if policy_type not in {"pi05", "pi05_full"}:
+    if policy_type not in {"pi05", "pi05_full", "starvla_groot"}:
         return None
     if robot_type != "spark3_pose_gripper":
         return None

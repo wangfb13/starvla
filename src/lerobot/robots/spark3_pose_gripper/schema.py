@@ -376,6 +376,10 @@ def end_effector_feature_dict(
     return features
 
 
+def joint_feature_dict(joint_names: tuple[str, ...] | list[str]) -> dict[str, type]:
+    return {joint_name: float for joint_name in joint_names}
+
+
 def end_effector_dict(
     name: str,
     config: Spark3EndEffectorConfig,
@@ -492,6 +496,16 @@ def action_feature_dict(end_effectors: dict[str, Spark3EndEffectorConfig]) -> di
     features.update(pose_feature_dict("main_head"))
     features.update(pose_feature_dict("main_hip"))
     features.update(base_twist_feature_dict())
+    features.update(end_effector_feature_dict(end_effectors))
+    return features
+
+
+def joint_action_feature_dict(
+    joint_names: tuple[str, ...] | list[str],
+    end_effectors: dict[str, Spark3EndEffectorConfig],
+) -> dict[str, type]:
+    features: dict[str, type] = {}
+    features.update(joint_feature_dict(joint_names))
     features.update(end_effector_feature_dict(end_effectors))
     return features
 

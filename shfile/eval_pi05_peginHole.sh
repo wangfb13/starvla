@@ -3,11 +3,13 @@ export TOKENIZERS_PARALLELISM=false
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+COMMAND_MODE="${COMMAND_MODE:-pose}"
 LEFT_GRIPPER_OFFSET="${LEFT_GRIPPER_OFFSET:-0.0}"
 RIGHT_GRIPPER_OFFSET="${RIGHT_GRIPPER_OFFSET:-0.0}"
 
 python src/lerobot/scripts/lerobot_record.py \
   --robot.type=spark3_pose_gripper \
+  --robot.command_mode="${COMMAND_MODE}" \
   --robot.cameras='{
     "cam_left_wrist": {
       "type": "wirstFisheyeX5",

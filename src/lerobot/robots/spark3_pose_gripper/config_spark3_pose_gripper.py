@@ -29,6 +29,8 @@ class Spark3PoseGripperConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     state_topic: str = "/wbc_state_pose"
     command_topic: str = "/wbc_goal_pose"
+    command_mode: str = "pose"
+    joint_command_topic: str = "/joint_commands"
     joint_state_topic: str = "/joint_states"
     pose_selection: int = 3
     connect_timeout_s: float = 10.0
@@ -36,6 +38,7 @@ class Spark3PoseGripperConfig(RobotConfig):
     trigger_initial_pose_service: str | None = None
     use_pi0_observation_state: bool = False
     joint_name_mapping: dict[str, str] = field(default_factory=default_joint_name_mapping)
+    action_joint_names: list[str] = field(default_factory=list)
     end_effectors: dict[str, Spark3EndEffectorConfig] = field(default_factory=default_end_effectors)
     sensors: dict[str, Spark3ObservationTopicConfig] = field(default_factory=dict)
     # Default to the measured TCP v2 preset for new Spark pose/gripper configs.
@@ -54,6 +57,10 @@ class Spark3PoseGripperConfig(RobotConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.command_mode not in {"pose", "joint"}:
+            raise ValueError(f"`command_mode` must be either 'pose' or 'joint', got {self.command_mode!r}.")
+        if len(self.action_joint_names) != len(set(self.action_joint_names)):
+            raise ValueError("`action_joint_names` must not contain duplicates.")
         for name, pose in {
             "default_left_arm_pose": self.default_left_arm_pose,
             "default_right_arm_pose": self.default_right_arm_pose,
