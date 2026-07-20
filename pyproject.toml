@@ -152,6 +152,10 @@ starvla_groot = [
     "timm>=1.0.0,<1.1.0",
     "Pillow>=10.0.0,<13.0.0",
 ]
+starvla = [
+    "lerobot[starvla_groot]",
+    "omegaconf>=2.3.0,<3.0.0",
+]
 multi_task_dit = ["lerobot[transformers-dep]"]
 groot = [
     "lerobot[transformers-dep]",
@@ -201,6 +205,7 @@ all = [
     "lerobot[wallx]",
     "lerobot[pi]",
     "lerobot[smolvla]",
+    "lerobot[starvla]",
     "lerobot[starvla_groot]",
     # "lerobot[groot]", TODO(Steven): Gr00t requires specific installation instructions for flash-attn
     "lerobot[xvla]",

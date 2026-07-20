@@ -40,6 +40,7 @@ from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.sarm.configuration_sarm import SARMConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+from lerobot.policies.starvla.configuration_starvla import StarVLAConfig
 from lerobot.policies.starvla_groot.configuration_starvla_groot import StarvlaGrootConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.utils import validate_visual_features_consistency
@@ -179,6 +180,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.starvla_groot.modeling_starvla_groot import StarvlaGrootPolicy
 
         return StarvlaGrootPolicy
+    elif name == "starvla":
+        from lerobot.policies.starvla.modeling_starvla import StarVLAPolicy
+
+        return StarVLAPolicy
     elif name == "sarm":
         from lerobot.policies.sarm.modeling_sarm import SARMRewardModel
 
@@ -243,6 +248,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return SmolVLAConfig(**kwargs)
     elif policy_type == "starvla_groot":
         return StarvlaGrootConfig(**kwargs)
+    elif policy_type == "starvla":
+        return StarVLAConfig(**kwargs)
     elif policy_type == "reward_classifier":
         return RewardClassifierConfig(**kwargs)
     elif policy_type == "groot":
@@ -538,6 +545,14 @@ def make_pre_post_processors(
         )
 
         processors = make_starvla_groot_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, StarVLAConfig):
+        from lerobot.policies.starvla.processor_starvla import make_starvla_pre_post_processors
+
+        processors = make_starvla_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )
