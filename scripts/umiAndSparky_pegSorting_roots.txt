@@ -1,2 +1,0 @@
-/mnt/tacumi_data/lerobot_datasetV30_train_ready/deformation/DAG911262R00377E_ugtolerobot_0601_150452_re
-/mnt/tacumi_data/lerobot_datasetV30_train_ready/sparky_ugripper/sparky_ugripper_peg_sorting_260_v1gripper_3_v30_tcp

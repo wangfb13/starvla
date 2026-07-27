@@ -73,9 +73,21 @@ class StarVLAPolicy(PreTrainedPolicy):
         apply_config_compat(official_cfg)
         self.starvla_config = official_cfg
         self.starvla_model = self._build_selected_framework(official_cfg, FRAMEWORK_REGISTRY)
+        if config.freeze_vlm:
+            self._freeze_vlm_backbone()
         self.to(config.device)
         self.last_starvla_output: Any | None = None
         self.reset()
+
+    def _freeze_vlm_backbone(self) -> None:
+        qwen_vl = getattr(self.starvla_model, "qwen_vl_interface", None)
+        if qwen_vl is None:
+            raise AttributeError(
+                f"StarVLA framework {self.config.framework_name!r} has no qwen_vl_interface to freeze."
+            )
+        for param in qwen_vl.parameters():
+            param.requires_grad = False
+        qwen_vl.eval()
 
     def _build_selected_framework(self, official_cfg: Any, framework_registry: Any) -> torch.nn.Module:
         framework_name = str(self.config.framework_name)

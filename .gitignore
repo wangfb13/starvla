@@ -177,3 +177,9 @@ outputs/
 *.xml
 *.part
 .waylog/
+# Local training shell files
+shfile/
+shfiles/
+
+# Local dataset root manifests
+scripts/*_roots*.txt

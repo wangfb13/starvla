@@ -28,10 +28,12 @@ class StarVLAConfig(PreTrainedConfig):
 
     base_vlm: str | None = None
     attn_implementation: str = "sdpa"
+    freeze_vlm: bool = False
 
     n_obs_steps: int = 1
     chunk_size: int = 16
     n_action_steps: int = 16
+    action_gap_frames: int = 6
     action_execution_skip_start_steps: int = 0
 
     action_dim: int | None = None
@@ -64,13 +66,17 @@ class StarVLAConfig(PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size))
+        start = int(self.action_gap_frames)
+        return list(range(start, start + self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:
         return None
 
     def validate_features(self) -> None:
+        if self.action_gap_frames < 0:
+            raise ValueError("action_gap_frames must be non-negative.")
+
         if self.input_features is None:
             self.input_features = {}
         if self.output_features is None:
@@ -151,4 +157,14 @@ class StarVLAConfig(PreTrainedConfig):
         framework["action_model"] = action_model
 
         cfg["framework"] = framework
+
+        datasets = dict(cfg.get("datasets", {}))
+        vla_data = dict(datasets.get("vla_data", {}))
+        vla_data.setdefault("obs_image_size", [224, 224])
+        datasets["vla_data"] = vla_data
+        cfg["datasets"] = datasets
+
+        trainer = dict(cfg.get("trainer", {}))
+        trainer.setdefault("repeated_diffusion_steps", 2)
+        cfg["trainer"] = trainer
         return cfg
