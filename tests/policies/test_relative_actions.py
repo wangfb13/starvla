@@ -254,6 +254,60 @@ def test_online_episode_anchor_state_is_not_applied_to_training_transition():
     assert step._episode_anchor_state is None
 
 
+def test_online_gripper_calibration_roundtrip_and_training_bypass():
+    names = [
+        "left_x",
+        "left_y",
+        "left_z",
+        "left_rot6d_0",
+        "left_rot6d_1",
+        "left_rot6d_2",
+        "left_rot6d_3",
+        "left_rot6d_4",
+        "left_rot6d_5",
+        "gripper_left",
+        "right_x",
+        "right_y",
+        "right_z",
+        "right_rot6d_0",
+        "right_rot6d_1",
+        "right_rot6d_2",
+        "right_rot6d_3",
+        "right_rot6d_4",
+        "right_rot6d_5",
+        "gripper_right",
+    ]
+    scales = {"gripper_left": 0.803053081035614, "gripper_right": 0.812948226928711}
+    robot_state = torch.zeros(1, 20)
+    robot_state[:, [9, 19]] = 1.0
+    step = RelativeActionsProcessorStep(
+        enabled=True,
+        exclude_joints=["gripper"],
+        action_names=names,
+        online_gripper_umi_open_values=scales,
+    )
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=step)
+
+    online = step(batch_to_transition({OBS_STATE: robot_state}))
+    model_state = online[TransitionKey.OBSERVATION][OBS_STATE]
+    torch.testing.assert_close(model_state[:, 9], torch.tensor([scales["gripper_left"]]))
+    torch.testing.assert_close(model_state[:, 19], torch.tensor([scales["gripper_right"]]))
+    # TCP decoding must continue to use the uncalibrated raw robot state.
+    torch.testing.assert_close(step._last_state, robot_state)
+
+    umi_action = torch.zeros(1, 1, 20)
+    umi_action[..., 9] = 0.765071
+    umi_action[..., 19] = 0.750790
+    robot_action = absolute_step(batch_to_transition({ACTION: umi_action}))[TransitionKey.ACTION]
+    torch.testing.assert_close(robot_action[..., 9], torch.tensor([[0.765071 / scales["gripper_left"]]]))
+    torch.testing.assert_close(robot_action[..., 19], torch.tensor([[0.750790 / scales["gripper_right"]]]))
+
+    # Training transitions already carry UMI values and must not be calibrated again.
+    training_action = torch.zeros(1, 1, 20)
+    training = step(batch_to_transition({OBS_STATE: model_state, ACTION: training_action}))
+    torch.testing.assert_close(training[TransitionKey.OBSERVATION][OBS_STATE], model_state)
+
+
 # Chunk-level relative stats test
 
 

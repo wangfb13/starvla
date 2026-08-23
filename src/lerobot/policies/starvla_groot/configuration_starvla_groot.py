@@ -113,6 +113,9 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     # after each processor reset. Relative actions are still decoded against the
     # current raw base-frame TCP state.
     online_anchor_state_to_episode_start: bool = False
+    # Inference-only mapping from canonical gripper feature name to the UMI value
+    # corresponding to robot gripper 1.0 (fully open). Empty keeps identity mapping.
+    online_gripper_umi_open_values: dict[str, float] = field(default_factory=dict)
     action_feature_names: list[str] | None = None
     state_feature_names: list[str] | None = None
     source_action_feature_names: list[str] | None = None
@@ -167,6 +170,12 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             raise ValueError(
                 "online_anchor_state_to_episode_start requires relative_action_keyframes."
             )
+        for name, value in self.online_gripper_umi_open_values.items():
+            if not 0.0 < float(value) <= 1.0:
+                raise ValueError(
+                    "online_gripper_umi_open_values must be in (0, 1], "
+                    f"got {name}={value}."
+                )
         if self.action_gap_dataset_overrides:
             seen_dataset_indices: set[int] = set()
             for spec in self.action_gap_dataset_overrides:

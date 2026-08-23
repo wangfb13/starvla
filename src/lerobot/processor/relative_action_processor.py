@@ -298,6 +298,10 @@ class RelativeActionsProcessorStep(ProcessorStep):
     # episode-start anchor frame.  The raw state remains cached in _last_state so
     # AbsoluteActionsProcessorStep still decodes local actions in the robot base frame.
     online_anchor_state_to_episode_start: bool = False
+    # Inference-only physical gripper calibration. Each value is the UMI canonical
+    # gripper value that corresponds to robot state/command 1.0 (fully open).
+    # Robot->model multiplies by this value; model->robot applies its inverse.
+    online_gripper_umi_open_values: dict[str, float] = field(default_factory=dict)
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
     _episode_anchor_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
@@ -320,6 +324,27 @@ class RelativeActionsProcessorStep(ProcessorStep):
 
         return mask
 
+    def _calibrate_online_grippers(self, values: torch.Tensor, *, inverse: bool) -> torch.Tensor:
+        """Map robot gripper values to UMI coordinates, or invert that mapping."""
+        if not self.online_gripper_umi_open_values or self.action_names is None:
+            return values
+
+        calibrated = values.clone()
+        for idx, name in enumerate(self.action_names[: values.shape[-1]]):
+            if name not in self.online_gripper_umi_open_values:
+                continue
+            umi_open = float(self.online_gripper_umi_open_values[name])
+            if not 0.0 < umi_open <= 1.0:
+                raise ValueError(
+                    "online_gripper_umi_open_values must be in (0, 1], "
+                    f"got {name}={umi_open}."
+                )
+            if inverse:
+                calibrated[..., idx] = (calibrated[..., idx] / umi_open).clamp(0.0, 1.0)
+            else:
+                calibrated[..., idx] = calibrated[..., idx].clamp(0.0, 1.0) * umi_open
+        return calibrated
+
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION, {})
         state = observation.get(OBS_STATE) if observation else None
@@ -333,25 +358,37 @@ class RelativeActionsProcessorStep(ProcessorStep):
 
         new_transition = transition.copy()
 
+        # The checkpoint was trained on UMI gripper coordinates, while the online
+        # robot reports 1.0 at its own fully-open endpoint. Apply the calibration
+        # only to observation-only inference transitions; training sidecars are
+        # already in UMI coordinates.
+        model_state = state
+        if action is None and state is not None:
+            model_state = self._calibrate_online_grippers(state, inverse=False)
+
         # Training sidecars already contain episode-anchor-relative state. Apply
         # this conversion only to observation-only online inference transitions.
-        if self.online_anchor_state_to_episode_start and action is None and state is not None:
+        if self.online_anchor_state_to_episode_start and action is None and model_state is not None:
             if self._episode_anchor_state is None:
-                self._episode_anchor_state = state.detach().clone()
-            elif self._episode_anchor_state.shape != state.shape:
+                self._episode_anchor_state = model_state.detach().clone()
+            elif self._episode_anchor_state.shape != model_state.shape:
                 raise RuntimeError(
                     "Online episode-anchor state shape changed without a processor reset: "
-                    f"anchor={tuple(self._episode_anchor_state.shape)} current={tuple(state.shape)}"
+                    f"anchor={tuple(self._episode_anchor_state.shape)} current={tuple(model_state.shape)}"
                 )
 
             anchored_state = to_keyframe_relative_actions(
-                state,
+                model_state,
                 self._episode_anchor_state,
                 self.relative_action_keyframes,
                 self.relative_exclude_keys,
             )
             new_observation = observation.copy()
             new_observation[OBS_STATE] = anchored_state
+            new_transition[TransitionKey.OBSERVATION] = new_observation
+        elif model_state is not None and model_state is not state:
+            new_observation = observation.copy()
+            new_observation[OBS_STATE] = model_state
             new_transition[TransitionKey.OBSERVATION] = new_observation
 
         if not self.enabled:
@@ -386,6 +423,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "relative_action_keyframes": self.relative_action_keyframes,
             "relative_exclude_keys": self.relative_exclude_keys,
             "online_anchor_state_to_episode_start": self.online_anchor_state_to_episode_start,
+            "online_gripper_umi_open_values": self.online_gripper_umi_open_values,
         }
 
     def reset(self) -> None:
@@ -456,6 +494,7 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
                 self.relative_step.relative_action_keyframes,
                 self.relative_step.relative_exclude_keys,
             )
+        action = self.relative_step._calibrate_online_grippers(action, inverse=True)
         new_transition[TransitionKey.ACTION] = action
         return new_transition
 

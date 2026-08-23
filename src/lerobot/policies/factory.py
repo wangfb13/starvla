@@ -385,6 +385,9 @@ def make_pre_post_processors(
             relative_overrides["online_anchor_state_to_episode_start"] = getattr(
                 policy_cfg, "online_anchor_state_to_episode_start", False
             )
+            relative_overrides["online_gripper_umi_open_values"] = getattr(
+                policy_cfg, "online_gripper_umi_open_values", {}
+            )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
 
         if pretrained_path and isinstance(policy_cfg, (PI05Config, StarvlaGrootConfig)) and getattr(

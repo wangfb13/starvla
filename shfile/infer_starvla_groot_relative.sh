@@ -31,6 +31,8 @@ LEFT_GRIPPER_OFFSET="${LEFT_GRIPPER_OFFSET:-0.0}"
 RIGHT_GRIPPER_OFFSET="${RIGHT_GRIPPER_OFFSET:-0.0}"
 ACTION_SKIP_START_STEPS="${ACTION_SKIP_START_STEPS:-0}"
 PLAY_SOUNDS="${PLAY_SOUNDS:-false}"
+LEFT_GRIPPER_UMI_OPEN="${LEFT_GRIPPER_UMI_OPEN:-0.803053081035614}"
+RIGHT_GRIPPER_UMI_OPEN="${RIGHT_GRIPPER_UMI_OPEN:-0.812948226928711}"
 
 if [[ -z "${POLICY_PATH}" ]]; then
   echo "Usage: POLICY_PATH=/path/to/checkpoint/pretrained_model $0" >&2
@@ -81,6 +83,7 @@ echo "[info] mode=relative policy_path=${POLICY_PATH}"
 echo "[info] task=${TASK_TEXT} chunk=32 execute=16 delay=4 skip=${ACTION_SKIP_START_STEPS}"
 echo "[info] DiT state is relative to the first TCP state after episode reset"
 echo "[info] relative TCP action is decoded against the current raw robot base-frame TCP; no QR calibration"
+echo "[info] gripper calibration robot_open=1.0 -> UMI left=${LEFT_GRIPPER_UMI_OPEN} right=${RIGHT_GRIPPER_UMI_OPEN}; model output uses inverse mapping"
 
 "${PYTHON_BIN}" src/lerobot/scripts/lerobot_record.py \
   --robot.type=spark3_pose_gripper \
@@ -106,6 +109,7 @@ echo "[info] relative TCP action is decoded against the current raw robot base-f
   --policy.device=cuda \
   --policy.use_amp=true \
   --policy.online_anchor_state_to_episode_start=true \
+  --policy.online_gripper_umi_open_values='{"gripper_left":'"${LEFT_GRIPPER_UMI_OPEN}"',"gripper_right":'"${RIGHT_GRIPPER_UMI_OPEN}"'}' \
   --policy.action_execution_skip_start_steps="${ACTION_SKIP_START_STEPS}" \
   --gripper_offsets.left="${LEFT_GRIPPER_OFFSET}" \
   --gripper_offsets.right="${RIGHT_GRIPPER_OFFSET}" \

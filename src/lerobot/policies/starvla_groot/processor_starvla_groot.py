@@ -68,6 +68,7 @@ def make_starvla_groot_pre_post_processors(
         online_anchor_state_to_episode_start=getattr(
             config, "online_anchor_state_to_episode_start", False
         ),
+        online_gripper_umi_open_values=getattr(config, "online_gripper_umi_open_values", {}),
     )
 
     input_steps: list[ProcessorStep] = [
