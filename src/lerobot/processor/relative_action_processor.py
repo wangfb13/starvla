@@ -294,7 +294,12 @@ class RelativeActionsProcessorStep(ProcessorStep):
     action_names: list[str] | None = None
     relative_action_keyframes: list[str] = field(default_factory=list)
     relative_exclude_keys: list[str] = field(default_factory=list)
+    # Inference-only adapter for checkpoints whose DiT state was trained in an
+    # episode-start anchor frame.  The raw state remains cached in _last_state so
+    # AbsoluteActionsProcessorStep still decodes local actions in the robot base frame.
+    online_anchor_state_to_episode_start: bool = False
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
+    _episode_anchor_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
         if not self.exclude_joints or self.action_names is None:
@@ -318,16 +323,40 @@ class RelativeActionsProcessorStep(ProcessorStep):
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION, {})
         state = observation.get(OBS_STATE) if observation else None
+        action = transition.get(TransitionKey.ACTION)
 
-        # Always cache state for the paired AbsoluteActionsProcessorStep
+        # Always cache the raw state for the paired AbsoluteActionsProcessorStep.
+        # Do not replace this with the episode-relative DiT state: action decoding
+        # must use the current base-frame TCP pose.
         if state is not None:
-            self._last_state = state
-
-        if not self.enabled:
-            return transition
+            self._last_state = state.detach().clone()
 
         new_transition = transition.copy()
-        action = new_transition.get(TransitionKey.ACTION)
+
+        # Training sidecars already contain episode-anchor-relative state. Apply
+        # this conversion only to observation-only online inference transitions.
+        if self.online_anchor_state_to_episode_start and action is None and state is not None:
+            if self._episode_anchor_state is None:
+                self._episode_anchor_state = state.detach().clone()
+            elif self._episode_anchor_state.shape != state.shape:
+                raise RuntimeError(
+                    "Online episode-anchor state shape changed without a processor reset: "
+                    f"anchor={tuple(self._episode_anchor_state.shape)} current={tuple(state.shape)}"
+                )
+
+            anchored_state = to_keyframe_relative_actions(
+                state,
+                self._episode_anchor_state,
+                self.relative_action_keyframes,
+                self.relative_exclude_keys,
+            )
+            new_observation = observation.copy()
+            new_observation[OBS_STATE] = anchored_state
+            new_transition[TransitionKey.OBSERVATION] = new_observation
+
+        if not self.enabled:
+            return new_transition
+
         if action is None or state is None:
             return new_transition
 
@@ -356,7 +385,12 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "action_names": self.action_names,
             "relative_action_keyframes": self.relative_action_keyframes,
             "relative_exclude_keys": self.relative_exclude_keys,
+            "online_anchor_state_to_episode_start": self.online_anchor_state_to_episode_start,
         }
+
+    def reset(self) -> None:
+        self._last_state = None
+        self._episode_anchor_state = None
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]

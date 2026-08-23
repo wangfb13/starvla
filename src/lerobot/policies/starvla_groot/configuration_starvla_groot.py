@@ -109,6 +109,10 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     relative_action_keyframes: list[str] = field(default_factory=list)
     relative_exclude_keys: list[str] = field(default_factory=list)
     relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    # Inference-only: express DiT observation.state relative to the first state
+    # after each processor reset. Relative actions are still decoded against the
+    # current raw base-frame TCP state.
+    online_anchor_state_to_episode_start: bool = False
     action_feature_names: list[str] | None = None
     state_feature_names: list[str] | None = None
     source_action_feature_names: list[str] | None = None
@@ -155,6 +159,14 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             )
         if self.action_gap_frames < 0:
             raise ValueError("action_gap_frames must be non-negative.")
+        if self.online_anchor_state_to_episode_start and not self.use_relative_actions:
+            raise ValueError(
+                "online_anchor_state_to_episode_start requires use_relative_actions=True."
+            )
+        if self.online_anchor_state_to_episode_start and not self.relative_action_keyframes:
+            raise ValueError(
+                "online_anchor_state_to_episode_start requires relative_action_keyframes."
+            )
         if self.action_gap_dataset_overrides:
             seen_dataset_indices: set[int] = set()
             for spec in self.action_gap_dataset_overrides:

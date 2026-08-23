@@ -378,6 +378,15 @@ def make_pre_post_processors(
             )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
 
+        if pretrained_path and isinstance(policy_cfg, StarvlaGrootConfig):
+            # Deployment may enable the episode-anchor state adapter when loading
+            # an older checkpoint whose saved processor config predates this flag.
+            relative_overrides = preprocessor_overrides.setdefault("delta_actions_processor", {})
+            relative_overrides["online_anchor_state_to_episode_start"] = getattr(
+                policy_cfg, "online_anchor_state_to_episode_start", False
+            )
+            kwargs["preprocessor_overrides"] = preprocessor_overrides
+
         if pretrained_path and isinstance(policy_cfg, (PI05Config, StarvlaGrootConfig)) and getattr(
             policy_cfg, "canonicalize_bimanual_rot6d", False
         ):

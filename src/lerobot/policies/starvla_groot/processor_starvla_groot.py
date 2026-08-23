@@ -65,6 +65,9 @@ def make_starvla_groot_pre_post_processors(
         action_names=getattr(config, "action_feature_names", None),
         relative_action_keyframes=getattr(config, "relative_action_keyframes", []),
         relative_exclude_keys=getattr(config, "relative_exclude_keys", []),
+        online_anchor_state_to_episode_start=getattr(
+            config, "online_anchor_state_to_episode_start", False
+        ),
     )
 
     input_steps: list[ProcessorStep] = [

@@ -181,6 +181,79 @@ def test_processor_keyframes_do_not_apply_scalar_relative_to_rot6d_twice():
     torch.testing.assert_close(recovered, action, atol=1e-5, rtol=1e-5)
 
 
+def test_online_episode_anchor_state_keeps_raw_state_for_action_decode():
+    identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    z90_rot6d = torch.tensor([0.0, 1.0, 0.0, -1.0, 0.0, 0.0])
+    anchor = torch.zeros(1, 22)
+    anchor[:, 0:3] = torch.tensor([1.0, 2.0, 3.0])
+    anchor[:, 3:9] = z90_rot6d
+    anchor[:, 9] = 0.4
+    anchor[:, 10:13] = torch.tensor([-1.0, -2.0, 0.5])
+    anchor[:, 13:19] = identity_rot6d
+    anchor[:, 19] = 0.6
+    anchor[:, 20:22] = 1.0
+
+    step = RelativeActionsProcessorStep(
+        enabled=True,
+        relative_action_keyframes=["0:3", "10:13"],
+        online_anchor_state_to_episode_start=True,
+    )
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=step)
+
+    first = step(batch_to_transition({OBS_STATE: anchor}))
+    first_model_state = first[TransitionKey.OBSERVATION][OBS_STATE]
+    torch.testing.assert_close(first_model_state[:, 0:3], torch.zeros(1, 3))
+    torch.testing.assert_close(first_model_state[:, 3:9], identity_rot6d.unsqueeze(0))
+    torch.testing.assert_close(first_model_state[:, 10:13], torch.zeros(1, 3))
+    torch.testing.assert_close(first_model_state[:, 13:19], identity_rot6d.unsqueeze(0))
+    torch.testing.assert_close(first_model_state[:, [9, 19, 20, 21]], anchor[:, [9, 19, 20, 21]])
+    torch.testing.assert_close(step._last_state, anchor)
+
+    current = anchor.clone()
+    current[:, 0:3] += torch.tensor([0.0, 1.0, 0.0])
+    current[:, 10:13] += torch.tensor([0.0, 0.2, 0.0])
+    second = step(batch_to_transition({OBS_STATE: current}))
+    second_model_state = second[TransitionKey.OBSERVATION][OBS_STATE]
+    # The left TCP anchor is rotated +90 degrees around z, so +world-y is +local-x.
+    torch.testing.assert_close(second_model_state[:, 0:3], torch.tensor([[1.0, 0.0, 0.0]]))
+    torch.testing.assert_close(second_model_state[:, 10:13], torch.tensor([[0.0, 0.2, 0.0]]))
+    torch.testing.assert_close(step._last_state, current)
+
+    predicted_relative = torch.zeros(1, 1, 20)
+    predicted_relative[..., 0] = 0.1
+    predicted_relative[..., 3:9] = identity_rot6d
+    predicted_relative[..., 13:19] = identity_rot6d
+    decoded = absolute_step(batch_to_transition({ACTION: predicted_relative}))[TransitionKey.ACTION]
+    # Decode from the current raw pose: left local +x becomes +world-y under z90.
+    expected_left_position = current[:, 0:3] + torch.tensor([[0.0, 0.1, 0.0]])
+    torch.testing.assert_close(decoded[:, 0, 0:3], expected_left_position, atol=1e-6, rtol=1e-6)
+
+    step.reset()
+    reanchored = step(batch_to_transition({OBS_STATE: current}))[TransitionKey.OBSERVATION][OBS_STATE]
+    torch.testing.assert_close(reanchored[:, 0:3], torch.zeros(1, 3))
+    torch.testing.assert_close(reanchored[:, 3:9], identity_rot6d.unsqueeze(0))
+
+
+def test_online_episode_anchor_state_is_not_applied_to_training_transition():
+    state = torch.zeros(1, 20)
+    state[:, 0:3] = torch.tensor([1.0, 2.0, 3.0])
+    state[:, 3:9] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    state[:, 10:13] = torch.tensor([-1.0, -2.0, -3.0])
+    state[:, 13:19] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    action = state[:, None, :].clone()
+    transition = batch_to_transition({ACTION: action, OBS_STATE: state})
+    step = RelativeActionsProcessorStep(
+        enabled=True,
+        relative_action_keyframes=["0:3", "10:13"],
+        online_anchor_state_to_episode_start=True,
+    )
+
+    result = step(transition)
+
+    torch.testing.assert_close(result[TransitionKey.OBSERVATION][OBS_STATE], state)
+    assert step._episode_anchor_state is None
+
+
 # Chunk-level relative stats test
 
 
