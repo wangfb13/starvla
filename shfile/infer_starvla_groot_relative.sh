@@ -33,6 +33,11 @@ ACTION_SKIP_START_STEPS="${ACTION_SKIP_START_STEPS:-0}"
 PLAY_SOUNDS="${PLAY_SOUNDS:-false}"
 LEFT_GRIPPER_UMI_OPEN="${LEFT_GRIPPER_UMI_OPEN:-0.803053081035614}"
 RIGHT_GRIPPER_UMI_OPEN="${RIGHT_GRIPPER_UMI_OPEN:-0.812948226928711}"
+GRIPPER_OPEN_LATCH="${GRIPPER_OPEN_LATCH:-true}"
+LEFT_GRIPPER_CLOSE_TRIGGER="${LEFT_GRIPPER_CLOSE_TRIGGER:-0.76}"
+RIGHT_GRIPPER_CLOSE_TRIGGER="${RIGHT_GRIPPER_CLOSE_TRIGGER:-0.77}"
+GRIPPER_LATCH_PREFIX_STEPS="${GRIPPER_LATCH_PREFIX_STEPS:-4}"
+GRIPPER_LATCH_CONSECUTIVE_CHUNKS="${GRIPPER_LATCH_CONSECUTIVE_CHUNKS:-2}"
 
 if [[ -z "${POLICY_PATH}" ]]; then
   echo "Usage: POLICY_PATH=/path/to/checkpoint/pretrained_model $0" >&2
@@ -84,6 +89,7 @@ echo "[info] task=${TASK_TEXT} chunk=32 execute=16 delay=4 skip=${ACTION_SKIP_ST
 echo "[info] DiT state is relative to the first TCP state after episode reset"
 echo "[info] relative TCP action is decoded against the current raw robot base-frame TCP; no QR calibration"
 echo "[info] gripper calibration robot_open=1.0 -> UMI left=${LEFT_GRIPPER_UMI_OPEN} right=${RIGHT_GRIPPER_UMI_OPEN}; model output uses inverse mapping"
+echo "[info] gripper open latch=${GRIPPER_OPEN_LATCH}; close triggers left=${LEFT_GRIPPER_CLOSE_TRIGGER} right=${RIGHT_GRIPPER_CLOSE_TRIGGER}; prefix=${GRIPPER_LATCH_PREFIX_STEPS} consecutive_chunks=${GRIPPER_LATCH_CONSECUTIVE_CHUNKS}"
 
 "${PYTHON_BIN}" src/lerobot/scripts/lerobot_record.py \
   --robot.type=spark3_pose_gripper \
@@ -110,6 +116,10 @@ echo "[info] gripper calibration robot_open=1.0 -> UMI left=${LEFT_GRIPPER_UMI_O
   --policy.use_amp=true \
   --policy.online_anchor_state_to_episode_start=true \
   --policy.online_gripper_umi_open_values='{"gripper_left":'"${LEFT_GRIPPER_UMI_OPEN}"',"gripper_right":'"${RIGHT_GRIPPER_UMI_OPEN}"'}' \
+  --policy.online_gripper_open_latch="${GRIPPER_OPEN_LATCH}" \
+  --policy.online_gripper_close_thresholds='{"gripper_left":'"${LEFT_GRIPPER_CLOSE_TRIGGER}"',"gripper_right":'"${RIGHT_GRIPPER_CLOSE_TRIGGER}"'}' \
+  --policy.online_gripper_latch_prefix_steps="${GRIPPER_LATCH_PREFIX_STEPS}" \
+  --policy.online_gripper_latch_consecutive_chunks="${GRIPPER_LATCH_CONSECUTIVE_CHUNKS}" \
   --policy.action_execution_skip_start_steps="${ACTION_SKIP_START_STEPS}" \
   --gripper_offsets.left="${LEFT_GRIPPER_OFFSET}" \
   --gripper_offsets.right="${RIGHT_GRIPPER_OFFSET}" \

@@ -116,6 +116,12 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     # Inference-only mapping from canonical gripper feature name to the UMI value
     # corresponding to robot gripper 1.0 (fully open). Empty keeps identity mapping.
     online_gripper_umi_open_values: dict[str, float] = field(default_factory=dict)
+    # Inference-only: hold robot grippers fully open until the mean prediction over
+    # the first N action steps is below the per-arm threshold for M chunks.
+    online_gripper_open_latch: bool = False
+    online_gripper_close_thresholds: dict[str, float] = field(default_factory=dict)
+    online_gripper_latch_prefix_steps: int = 4
+    online_gripper_latch_consecutive_chunks: int = 2
     action_feature_names: list[str] | None = None
     state_feature_names: list[str] | None = None
     source_action_feature_names: list[str] | None = None
@@ -175,6 +181,32 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
                 raise ValueError(
                     "online_gripper_umi_open_values must be in (0, 1], "
                     f"got {name}={value}."
+                )
+        if self.online_gripper_open_latch and not self.use_relative_actions:
+            raise ValueError("online_gripper_open_latch requires use_relative_actions=True.")
+        if self.online_gripper_open_latch and not self.online_gripper_close_thresholds:
+            raise ValueError("online_gripper_open_latch requires online_gripper_close_thresholds.")
+        if self.online_gripper_latch_prefix_steps < 1:
+            raise ValueError("online_gripper_latch_prefix_steps must be at least 1.")
+        if self.online_gripper_latch_consecutive_chunks < 1:
+            raise ValueError("online_gripper_latch_consecutive_chunks must be at least 1.")
+        for name, value in self.online_gripper_close_thresholds.items():
+            threshold = float(value)
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(
+                    "online_gripper_close_thresholds must be in [0, 1], "
+                    f"got {name}={value}."
+                )
+            if name not in self.online_gripper_umi_open_values:
+                raise ValueError(
+                    "Every online_gripper_close_thresholds key requires a matching "
+                    f"online_gripper_umi_open_values entry, missing '{name}'."
+                )
+            if threshold >= float(self.online_gripper_umi_open_values[name]):
+                raise ValueError(
+                    "Each close threshold must be below its UMI fully-open value, "
+                    f"got {name}: threshold={threshold}, "
+                    f"open={self.online_gripper_umi_open_values[name]}."
                 )
         if self.action_gap_dataset_overrides:
             seen_dataset_indices: set[int] = set()

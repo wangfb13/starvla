@@ -302,8 +302,17 @@ class RelativeActionsProcessorStep(ProcessorStep):
     # gripper value that corresponds to robot state/command 1.0 (fully open).
     # Robot->model multiplies by this value; model->robot applies its inverse.
     online_gripper_umi_open_values: dict[str, float] = field(default_factory=dict)
+    # Inference-only open-gripper latch. While latched, the postprocessor emits the
+    # calibrated fully-open endpoint. An arm releases permanently for the episode
+    # after its predicted UMI gripper mean stays below the configured threshold.
+    online_gripper_open_latch: bool = False
+    online_gripper_close_thresholds: dict[str, float] = field(default_factory=dict)
+    online_gripper_latch_prefix_steps: int = 4
+    online_gripper_latch_consecutive_chunks: int = 2
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
     _episode_anchor_state: torch.Tensor | None = field(default=None, init=False, repr=False)
+    _online_gripper_latch_released: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
+    _online_gripper_latch_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
         if not self.exclude_joints or self.action_names is None:
@@ -344,6 +353,60 @@ class RelativeActionsProcessorStep(ProcessorStep):
             else:
                 calibrated[..., idx] = calibrated[..., idx].clamp(0.0, 1.0) * umi_open
         return calibrated
+
+    def _apply_online_gripper_open_latch(self, actions: torch.Tensor) -> torch.Tensor:
+        """Hold each gripper open until its UMI prediction shows a stable close intent."""
+        if (
+            not self.online_gripper_open_latch
+            or self.action_names is None
+            or not self.online_gripper_umi_open_values
+        ):
+            return actions
+        if actions.ndim < 2:
+            raise ValueError(
+                "online_gripper_open_latch expects a predicted action chunk with at least "
+                f"2 dimensions, got shape={tuple(actions.shape)}."
+            )
+        if self.online_gripper_latch_prefix_steps < 1:
+            raise ValueError("online_gripper_latch_prefix_steps must be at least 1.")
+        if self.online_gripper_latch_consecutive_chunks < 1:
+            raise ValueError("online_gripper_latch_consecutive_chunks must be at least 1.")
+
+        latched_actions = actions.clone()
+        prefix_steps = min(self.online_gripper_latch_prefix_steps, actions.shape[-2])
+        for idx, name in enumerate(self.action_names[: actions.shape[-1]]):
+            if name not in self.online_gripper_close_thresholds:
+                continue
+            if name not in self.online_gripper_umi_open_values:
+                raise ValueError(
+                    f"Missing online_gripper_umi_open_values entry for latched gripper '{name}'."
+                )
+            if self._online_gripper_latch_released.get(name, False):
+                continue
+
+            threshold = float(self.online_gripper_close_thresholds[name])
+            predicted_mean = float(actions[..., :prefix_steps, idx].detach().float().mean().cpu())
+            count = self._online_gripper_latch_counts.get(name, 0)
+            count = count + 1 if predicted_mean < threshold else 0
+            self._online_gripper_latch_counts[name] = count
+
+            if count >= self.online_gripper_latch_consecutive_chunks:
+                self._online_gripper_latch_released[name] = True
+                LOGGER.info(
+                    "Released online open-gripper latch for %s: UMI prefix mean %.6f < %.6f "
+                    "for %d consecutive chunks.",
+                    name,
+                    predicted_mean,
+                    threshold,
+                    count,
+                )
+                continue
+
+            # This is still in UMI coordinates. The subsequent inverse calibration
+            # maps umi_open exactly to robot command 1.0.
+            latched_actions[..., idx] = float(self.online_gripper_umi_open_values[name])
+
+        return latched_actions
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION, {})
@@ -424,11 +487,17 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "relative_exclude_keys": self.relative_exclude_keys,
             "online_anchor_state_to_episode_start": self.online_anchor_state_to_episode_start,
             "online_gripper_umi_open_values": self.online_gripper_umi_open_values,
+            "online_gripper_open_latch": self.online_gripper_open_latch,
+            "online_gripper_close_thresholds": self.online_gripper_close_thresholds,
+            "online_gripper_latch_prefix_steps": self.online_gripper_latch_prefix_steps,
+            "online_gripper_latch_consecutive_chunks": self.online_gripper_latch_consecutive_chunks,
         }
 
     def reset(self) -> None:
         self._last_state = None
         self._episode_anchor_state = None
+        self._online_gripper_latch_released.clear()
+        self._online_gripper_latch_counts.clear()
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
@@ -494,6 +563,7 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
                 self.relative_step.relative_action_keyframes,
                 self.relative_step.relative_exclude_keys,
             )
+        action = self.relative_step._apply_online_gripper_open_latch(action)
         action = self.relative_step._calibrate_online_grippers(action, inverse=True)
         new_transition[TransitionKey.ACTION] = action
         return new_transition

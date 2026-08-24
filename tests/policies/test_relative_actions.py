@@ -308,6 +308,59 @@ def test_online_gripper_calibration_roundtrip_and_training_bypass():
     torch.testing.assert_close(training[TransitionKey.OBSERVATION][OBS_STATE], model_state)
 
 
+def test_online_gripper_open_latch_releases_per_arm_and_resets():
+    names = [f"feature_{idx}" for idx in range(20)]
+    names[9] = "gripper_left"
+    names[19] = "gripper_right"
+    scales = {"gripper_left": 0.803053081035614, "gripper_right": 0.812948226928711}
+    robot_state = torch.zeros(1, 20)
+    robot_state[:, [9, 19]] = 1.0
+    step = RelativeActionsProcessorStep(
+        enabled=True,
+        exclude_joints=["gripper"],
+        action_names=names,
+        online_gripper_umi_open_values=scales,
+        online_gripper_open_latch=True,
+        online_gripper_close_thresholds={"gripper_left": 0.76, "gripper_right": 0.77},
+        online_gripper_latch_prefix_steps=4,
+        online_gripper_latch_consecutive_chunks=2,
+    )
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=step)
+
+    def decode(left: float, right: float) -> torch.Tensor:
+        step(batch_to_transition({OBS_STATE: robot_state}))
+        predicted = torch.zeros(1, 8, 20)
+        predicted[..., 9] = left
+        predicted[..., 19] = right
+        return absolute_step(batch_to_transition({ACTION: predicted}))[TransitionKey.ACTION]
+
+    first = decode(0.79, 0.78)
+    torch.testing.assert_close(first[..., 9], torch.ones(1, 8))
+    torch.testing.assert_close(first[..., 19], torch.ones(1, 8))
+
+    first_close_signal = decode(0.78, 0.75)
+    torch.testing.assert_close(first_close_signal[..., 9], torch.ones(1, 8))
+    torch.testing.assert_close(first_close_signal[..., 19], torch.ones(1, 8))
+
+    released_right = decode(0.78, 0.75)
+    torch.testing.assert_close(released_right[..., 9], torch.ones(1, 8))
+    torch.testing.assert_close(
+        released_right[..., 19], torch.full((1, 8), 0.75 / scales["gripper_right"])
+    )
+
+    # Release is permanent within the episode; a later open-looking prediction
+    # must not re-latch the right gripper.
+    remains_released = decode(0.78, 0.80)
+    torch.testing.assert_close(
+        remains_released[..., 19], torch.full((1, 8), 0.80 / scales["gripper_right"])
+    )
+
+    step.reset()
+    relatched = decode(0.78, 0.75)
+    torch.testing.assert_close(relatched[..., 9], torch.ones(1, 8))
+    torch.testing.assert_close(relatched[..., 19], torch.ones(1, 8))
+
+
 # Chunk-level relative stats test
 
 

@@ -388,6 +388,18 @@ def make_pre_post_processors(
             relative_overrides["online_gripper_umi_open_values"] = getattr(
                 policy_cfg, "online_gripper_umi_open_values", {}
             )
+            relative_overrides["online_gripper_open_latch"] = getattr(
+                policy_cfg, "online_gripper_open_latch", False
+            )
+            relative_overrides["online_gripper_close_thresholds"] = getattr(
+                policy_cfg, "online_gripper_close_thresholds", {}
+            )
+            relative_overrides["online_gripper_latch_prefix_steps"] = getattr(
+                policy_cfg, "online_gripper_latch_prefix_steps", 4
+            )
+            relative_overrides["online_gripper_latch_consecutive_chunks"] = getattr(
+                policy_cfg, "online_gripper_latch_consecutive_chunks", 2
+            )
             kwargs["preprocessor_overrides"] = preprocessor_overrides
 
         if pretrained_path and isinstance(policy_cfg, (PI05Config, StarvlaGrootConfig)) and getattr(
