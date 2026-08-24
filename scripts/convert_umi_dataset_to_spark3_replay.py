@@ -5,11 +5,13 @@ The input action is expected to contain, for both arms, a gripper angle followed
 by a QR-frame TCP pose represented as xyz + XYZW quaternion. The output action
 contains base_link-frame absolute TCP poses and [0, 1] Spark3 gripper commands.
 
-The calibration matrix is interpreted as ``base_link_from_qr`` by default:
+When supplied, the calibration matrix is interpreted as ``base_link_from_qr``:
 
     T_base_tcp = T_base_qr @ T_qr_tcp
 
-This tool never connects to a robot and never sends commands.
+Pass ``--skip-frame-transform`` instead when a downstream motion-control adapter
+will perform that frame conversion. This tool never connects to a robot and never
+sends commands.
 """
 
 from __future__ import annotations
@@ -81,7 +83,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "matrix_path",
         type=Path,
-        help="4x4 base_link_from_qr calibration matrix (.json/.yaml/.npy/.txt/.csv).",
+        nargs="?",
+        default=None,
+        help="Optional 4x4 base_link_from_qr calibration matrix (.json/.yaml/.npy/.txt/.csv).",
     )
     parser.add_argument(
         "--output-root",
@@ -93,6 +97,14 @@ def parse_args() -> argparse.Namespace:
         "--invert-matrix",
         action="store_true",
         help="Invert the supplied matrix (use when the file stores qr_from_base_link).",
+    )
+    parser.add_argument(
+        "--skip-frame-transform",
+        action="store_true",
+        help=(
+            "Keep TCP poses in the QR frame and only convert field/gripper format. "
+            "Requires the downstream controller to apply base_link_from_qr before commanding the robot."
+        ),
     )
     parser.add_argument("--left-umi-open", type=float, default=-0.436)
     parser.add_argument("--left-umi-closed", type=float, default=0.0)
@@ -400,7 +412,20 @@ def convert_dataset(args: argparse.Namespace) -> Path:
     if not input_action_feature or not input_action_feature.get("names"):
         raise ValueError("Input meta/info.json must define action feature names.")
     input_indices = resolve_input_indices(list(input_action_feature["names"]))
-    base_from_qr = load_transform(args.matrix_path.resolve(), invert=args.invert_matrix)
+    if args.skip_frame_transform:
+        if args.matrix_path is not None:
+            raise ValueError("Do not provide matrix_path together with --skip-frame-transform.")
+        if args.invert_matrix:
+            raise ValueError("--invert-matrix cannot be used with --skip-frame-transform.")
+        base_from_qr = np.eye(4, dtype=np.float64)
+        output_coordinate_frame = "qr"
+    else:
+        if args.matrix_path is None:
+            raise ValueError(
+                "matrix_path is required unless --skip-frame-transform is explicitly selected."
+            )
+        base_from_qr = load_transform(args.matrix_path.resolve(), invert=args.invert_matrix)
+        output_coordinate_frame = "base_link"
 
     all_actions: list[np.ndarray] = []
     parquet_feature_names: set[str] = set()
@@ -463,6 +488,8 @@ def convert_dataset(args: argparse.Namespace) -> Path:
         report = {
             "source_dataset": str(source),
             "base_from_qr": base_from_qr.tolist(),
+            "action_coordinate_frame": output_coordinate_frame,
+            "frame_transform_applied": not args.skip_frame_transform,
             "matrix_was_inverted": bool(args.invert_matrix),
             "input_action_names": input_action_feature["names"],
             "output_action_names": OUTPUT_ACTION_NAMES,
@@ -492,7 +519,13 @@ def convert_dataset(args: argparse.Namespace) -> Path:
         raise
 
     print(f"[PASS] replay dataset written to {output}")
+    print(f"[info] output TCP action coordinate frame={output_coordinate_frame}")
     print(f"[info] episodes are preserved; select one with --dataset.episode=N (0-{info['total_episodes'] - 1})")
+    if args.skip_frame_transform:
+        print(
+            "[WARNING] QR-frame TCP actions are not directly replayable by the stock Spark3 driver; "
+            "the downstream motion-control layer must apply base_link_from_qr exactly once."
+        )
     print("[safety] This conversion does not move the robot. Validate the first pose and pre-position safely.")
     return output
 
