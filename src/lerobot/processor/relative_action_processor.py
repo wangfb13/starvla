@@ -294,6 +294,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
     action_names: list[str] | None = None
     relative_action_keyframes: list[str] = field(default_factory=list)
     relative_exclude_keys: list[str] = field(default_factory=list)
+    relative_state_history_to_current: bool = False
+    relative_scalar_state_history_indices: list[int] = field(default_factory=list)
     # Inference-only adapter for checkpoints whose DiT state was trained in an
     # episode-start anchor frame.  The raw state remains cached in _last_state so
     # AbsoluteActionsProcessorStep still decodes local actions in the robot base frame.
@@ -413,11 +415,21 @@ class RelativeActionsProcessorStep(ProcessorStep):
         state = observation.get(OBS_STATE) if observation else None
         action = transition.get(TransitionKey.ACTION)
 
-        # Always cache the raw state for the paired AbsoluteActionsProcessorStep.
+        if self.relative_state_history_to_current and state is not None:
+            if state.ndim != 3 or state.shape[-2] < 2:
+                raise ValueError(
+                    "relative_state_history_to_current expects state [B,H,D] with H>=2, "
+                    f"got {tuple(state.shape)}"
+                )
+            current_state = state[:, -1, :]
+        else:
+            current_state = state
+
+        # Always cache the current raw state for the paired AbsoluteActionsProcessorStep.
         # Do not replace this with the episode-relative DiT state: action decoding
         # must use the current base-frame TCP pose.
-        if state is not None:
-            self._last_state = state.detach().clone()
+        if current_state is not None:
+            self._last_state = current_state.detach().clone()
 
         new_transition = transition.copy()
 
@@ -431,7 +443,28 @@ class RelativeActionsProcessorStep(ProcessorStep):
 
         # Training sidecars already contain episode-anchor-relative state. Apply
         # this conversion only to observation-only online inference transitions.
-        if self.online_anchor_state_to_episode_start and action is None and model_state is not None:
+        if self.relative_state_history_to_current and model_state is not None:
+            model_state = to_keyframe_relative_actions(
+                model_state,
+                model_state[:, -1, :],
+                self.relative_action_keyframes,
+                self.relative_exclude_keys,
+            )
+            if self.relative_scalar_state_history_indices:
+                indices = list(dict.fromkeys(self.relative_scalar_state_history_indices))
+                if any(index < 0 or index >= model_state.shape[-1] for index in indices):
+                    raise ValueError(
+                        "relative_scalar_state_history_indices are outside the state dimension: "
+                        f"indices={indices}, state_dim={model_state.shape[-1]}"
+                    )
+                model_state = model_state.clone()
+                current_values = model_state[:, -1:, indices].clone()
+                model_state[:, :-1, indices] -= current_values
+                model_state[:, -1:, indices] = current_values
+            new_observation = observation.copy()
+            new_observation[OBS_STATE] = model_state
+            new_transition[TransitionKey.OBSERVATION] = new_observation
+        elif self.online_anchor_state_to_episode_start and action is None and model_state is not None:
             if self._episode_anchor_state is None:
                 self._episode_anchor_state = model_state.detach().clone()
             elif self._episode_anchor_state.shape != model_state.shape:
@@ -457,7 +490,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
         if not self.enabled:
             return new_transition
 
-        if action is None or state is None:
+        if action is None or current_state is None:
             return new_transition
 
         mask = self._build_mask(action.shape[-1])
@@ -466,16 +499,16 @@ class RelativeActionsProcessorStep(ProcessorStep):
             compatible_specs = _compatible_keyframe_specs(
                 specs,
                 action_dim=action.shape[-1],
-                state_dim=state.shape[-1],
+                state_dim=current_state.shape[-1],
             )
             action = to_keyframe_relative_actions(
                 action,
-                state,
+                current_state,
                 self.relative_action_keyframes,
                 self.relative_exclude_keys,
             )
             mask = _mask_keyframe_dims(mask, compatible_specs)
-        new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
+        new_transition[TransitionKey.ACTION] = to_relative_actions(action, current_state, mask)
         return new_transition
 
     def get_config(self) -> dict[str, Any]:
@@ -485,6 +518,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "action_names": self.action_names,
             "relative_action_keyframes": self.relative_action_keyframes,
             "relative_exclude_keys": self.relative_exclude_keys,
+            "relative_state_history_to_current": self.relative_state_history_to_current,
+            "relative_scalar_state_history_indices": self.relative_scalar_state_history_indices,
             "online_anchor_state_to_episode_start": self.online_anchor_state_to_episode_start,
             "online_gripper_umi_open_values": self.online_gripper_umi_open_values,
             "online_gripper_open_latch": self.online_gripper_open_latch,

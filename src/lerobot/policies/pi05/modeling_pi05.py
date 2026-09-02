@@ -452,6 +452,7 @@ class PaliGemmaWithExpertModel(
             "input_layernorm",
             "post_attention_layernorm",
             "model.norm",
+            "action_out_proj",
         ]
 
         for name, param in self.named_parameters():
@@ -735,13 +736,15 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             max_period=self.config.max_period,
             device=timestep.device,
         )
-        time_emb = time_emb.type(dtype=timestep.dtype)
+        time_emb = time_emb.to(dtype=self.time_mlp_in.weight.dtype)
 
         # Fuse timestep + action information using an MLP
         def action_proj_func(noisy_actions):
             return self.action_in_proj(noisy_actions)
 
-        action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
+        action_emb = self._apply_checkpoint(
+            action_proj_func, noisy_actions.to(dtype=self.action_in_proj.weight.dtype)
+        )
 
         def time_mlp_func(time_emb):
             x = self.time_mlp_in(time_emb)
@@ -825,9 +828,12 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         suffix_out = suffix_out.to(dtype=torch.float32)
 
         def action_out_proj_func(suffix_out):
-            return self.action_out_proj(suffix_out)
+            return self.action_out_proj(
+                suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+            )
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+        v_t = v_t.to(dtype=u_t.dtype)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
         if action_mask is not None:
@@ -962,7 +968,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         suffix_out = suffix_out.to(dtype=torch.float32)
-        return self.action_out_proj(suffix_out)
+        return self.action_out_proj(
+            suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+        )
 
 
 class PI05Policy(PreTrainedPolicy):

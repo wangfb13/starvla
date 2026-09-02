@@ -136,7 +136,7 @@ class Pi05ApplyMasksProcessorStep(ProcessorStep):
         state_mask = observation.get(self.state_mask_observation_key)
         if state is not None and state_mask is not None:
             state = state.clone()
-            state_mask = state_mask.to(dtype=state.dtype, device=state.device)
+            state_mask = _broadcast_feature_mask(state_mask, state)
             masked_dims = min(state_mask.shape[-1], state.shape[-1])
             state[..., :masked_dims] = state[..., :masked_dims] * state_mask[..., :masked_dims]
             observation[OBS_STATE] = state

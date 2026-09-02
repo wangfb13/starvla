@@ -15,6 +15,8 @@
 # limitations under the License.
 from pathlib import Path
 
+from huggingface_hub import save_torch_state_dict
+from torch import Tensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
@@ -71,6 +73,7 @@ def save_checkpoint(
     scheduler: LRScheduler | None = None,
     preprocessor: PolicyProcessorPipeline | None = None,
     postprocessor: PolicyProcessorPipeline | None = None,
+    policy_state_dict: dict[str, Tensor] | None = None,
 ) -> None:
     """This function creates the following directory structure:
 
@@ -97,7 +100,12 @@ def save_checkpoint(
         preprocessor: The preprocessor/pipeline to save. Defaults to None.
     """
     pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
-    policy.save_pretrained(pretrained_dir)
+    if policy_state_dict is None:
+        policy.save_pretrained(pretrained_dir)
+    else:
+        pretrained_dir.mkdir(parents=True, exist_ok=True)
+        policy.config._save_pretrained(pretrained_dir)
+        save_torch_state_dict(policy_state_dict, pretrained_dir, max_shard_size="1GB")
     cfg.save_pretrained(pretrained_dir)
     if cfg.peft is not None:
         # When using PEFT, policy.save_pretrained will only write the adapter weights + config, not the

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
-from lerobot.optim.optimizers import AdamConfig
+from lerobot.optim.optimizers import AdamConfig, AdamWConfig
 from lerobot.optim.schedulers import DiffuserSchedulerConfig
 
 
@@ -105,6 +105,32 @@ class DiffusionConfig(PreTrainedConfig):
     horizon: int = 16
     n_action_steps: int = 8
 
+    # Optional UMI-style temporal sampling. When action_gap_frames is None the
+    # original Diffusion Policy indexing (which includes the observation
+    # overlap) is preserved. Otherwise the model target is exactly
+    # action[t + gap + i * stride], i=0..horizon-1.
+    observation_stride_frames: int = 1
+    action_gap_frames: int | None = None
+    action_stride_frames: int = 1
+
+    # UMI-style SE(3) representation. Pose keyframes are composed in the
+    # current TCP frame; joints named in relative_exclude_joints (the grippers
+    # for UMI) remain absolute.
+    use_relative_actions: bool = False
+    relative_state_history_to_current: bool = False
+    relative_action_keyframes: list[str] = field(default_factory=list)
+    relative_exclude_keys: list[str] = field(default_factory=list)
+    relative_exclude_joints: list[str] = field(default_factory=list)
+    action_feature_names: list[str] | None = None
+    state_feature_names: list[str] | None = None
+
+    # Diffusion Policy/UMI use an exponential moving average for rollout.
+    use_ema: bool = False
+    ema_inv_gamma: float = 1.0
+    ema_power: float = 0.75
+    ema_min_value: float = 0.0
+    ema_max_value: float = 0.9999
+
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.MEAN_STD,
@@ -125,9 +151,15 @@ class DiffusionConfig(PreTrainedConfig):
     crop_shape: tuple[int, int] | None = None
     crop_is_random: bool = True
     pretrained_backbone_weights: str | None = None
+    timm_pretrained: bool = False
+    timm_pretrained_path: str | None = None
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
     use_separate_rgb_encoder_per_camera: bool = False
+    color_jitter_brightness: float = 0.0
+    color_jitter_contrast: float = 0.0
+    color_jitter_saturation: float = 0.0
+    color_jitter_hue: float = 0.0
     # Unet.
     down_dims: tuple[int, ...] = (512, 1024, 2048)
     kernel_size: int = 5
@@ -141,6 +173,7 @@ class DiffusionConfig(PreTrainedConfig):
     beta_start: float = 0.0001
     beta_end: float = 0.02
     prediction_type: str = "epsilon"
+    input_perturb: float = 0.0
     clip_sample: bool = True
     clip_sample_range: float = 1.0
 
@@ -159,6 +192,7 @@ class DiffusionConfig(PreTrainedConfig):
     optimizer_betas: tuple = (0.95, 0.999)
     optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 1e-6
+    optimizer_use_adamw: bool = False
     scheduler_name: str = "cosine"
     scheduler_warmup_steps: int = 500
 
@@ -166,9 +200,10 @@ class DiffusionConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
-        if not self.vision_backbone.startswith("resnet"):
+        if not self.vision_backbone.startswith(("resnet", "vit", "convnext")):
             raise ValueError(
-                f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
+                "vision_backbone must be a supported torchvision ResNet or timm ViT/ConvNeXt. "
+                f"Got {self.vision_backbone}."
             )
 
         supported_prediction_types = ["epsilon", "sample"]
@@ -202,6 +237,21 @@ class DiffusionConfig(PreTrainedConfig):
         if self.crop_shape is not None and (self.crop_shape[0] <= 0 or self.crop_shape[1] <= 0):
             raise ValueError(f"`crop_shape` must have positive dimensions. Got {self.crop_shape}.")
 
+        if self.observation_stride_frames < 1:
+            raise ValueError("observation_stride_frames must be at least 1.")
+        if self.action_gap_frames is not None and self.action_gap_frames < 0:
+            raise ValueError("action_gap_frames must be non-negative when configured.")
+        if self.action_stride_frames < 1:
+            raise ValueError("action_stride_frames must be at least 1.")
+        if self.relative_state_history_to_current and self.n_obs_steps < 2:
+            raise ValueError("relative_state_history_to_current requires n_obs_steps >= 2.")
+        if self.input_perturb < 0.0:
+            raise ValueError("input_perturb must be non-negative.")
+        if self.ema_inv_gamma <= 0.0 or self.ema_power <= 0.0:
+            raise ValueError("EMA inv_gamma and power must be positive.")
+        if not 0.0 <= self.ema_min_value <= self.ema_max_value < 1.0:
+            raise ValueError("EMA bounds must satisfy 0 <= min <= max < 1.")
+
         # Check that the horizon size and U-Net downsampling is compatible.
         # U-Net downsamples by 2 with each stage.
         downsampling_factor = 2 ** len(self.down_dims)
@@ -211,8 +261,9 @@ class DiffusionConfig(PreTrainedConfig):
                 f"by `len(down_dims)`). Got {self.horizon=} and {self.down_dims=}"
             )
 
-    def get_optimizer_preset(self) -> AdamConfig:
-        return AdamConfig(
+    def get_optimizer_preset(self) -> AdamConfig | AdamWConfig:
+        optimizer_cls = AdamWConfig if self.optimizer_use_adamw else AdamConfig
+        return optimizer_cls(
             lr=self.optimizer_lr,
             betas=self.optimizer_betas,
             eps=self.optimizer_eps,
@@ -248,11 +299,24 @@ class DiffusionConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> list:
-        return list(range(1 - self.n_obs_steps, 1))
+        return [
+            -i * int(self.observation_stride_frames)
+            for i in reversed(range(self.n_obs_steps))
+        ]
 
     @property
     def action_delta_indices(self) -> list:
+        if self.action_gap_frames is not None:
+            return [
+                int(self.action_gap_frames) + i * int(self.action_stride_frames)
+                for i in range(self.horizon)
+            ]
         return list(range(1 - self.n_obs_steps, 1 - self.n_obs_steps + self.horizon))
+
+    @property
+    def chunk_size(self) -> int:
+        """Compatibility alias used by sidecar relative-stat computation."""
+        return self.horizon
 
     @property
     def reward_delta_indices(self) -> None:

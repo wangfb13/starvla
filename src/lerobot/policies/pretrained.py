@@ -23,10 +23,10 @@ from typing import TypedDict, TypeVar, Unpack
 
 import packaging
 import safetensors
-from huggingface_hub import HfApi, ModelCard, ModelCardData, hf_hub_download
+from huggingface_hub import HfApi, ModelCard, ModelCardData, hf_hub_download, load_torch_model, save_torch_model
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
 from huggingface_hub.errors import HfHubHTTPError
-from safetensors.torch import load_model as load_model_as_safetensor, save_model as save_model_as_safetensor
+from safetensors.torch import load_model as load_model_as_safetensor
 from torch import Tensor, nn
 
 from lerobot.configs.policies import PreTrainedConfig
@@ -69,7 +69,9 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
     def _save_pretrained(self, save_directory: Path) -> None:
         self.config._save_pretrained(save_directory)
         model_to_save = self.module if hasattr(self, "module") else self
-        save_model_as_safetensor(model_to_save, str(save_directory / SAFETENSORS_SINGLE_FILE))
+        # Keep every checkpoint file below the cluster's per-file size limit.
+        # This writes Hugging Face-compatible shards and an index JSON.
+        save_torch_model(model_to_save, save_directory, max_shard_size="1GB")
 
     @classmethod
     def from_pretrained(
@@ -108,7 +110,14 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
         if os.path.isdir(model_id):
             print("Loading weights from local directory")
             model_file = os.path.join(model_id, SAFETENSORS_SINGLE_FILE)
-            policy = cls._load_as_safetensor(instance, model_file, config.device, strict)
+            if os.path.isfile(model_file):
+                policy = cls._load_as_safetensor(instance, model_file, config.device, strict)
+            else:
+                missing_keys, unexpected_keys = load_torch_model(
+                    instance, model_id, strict=strict, map_location=config.device
+                )
+                log_model_loading_keys(missing_keys, unexpected_keys)
+                policy = instance
         else:
             try:
                 model_file = hf_hub_download(

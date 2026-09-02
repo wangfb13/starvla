@@ -507,6 +507,7 @@ class FramewiseSidecar:
         chunk_size: int,
         action_gap_frames: int,
         action_names: list[str],
+        action_stride_frames: int = 1,
         relative_exclude_joints: list[str] | None = None,
         relative_action_keyframes: list[str] | None = None,
         relative_exclude_keys: list[str] | None = None,
@@ -518,6 +519,8 @@ class FramewiseSidecar:
             raise ValueError("chunk_size must be positive")
         if action_gap_frames < 0:
             raise ValueError("action_gap_frames must be non-negative")
+        if action_stride_frames < 1:
+            raise ValueError("action_stride_frames must be at least 1")
         if "episode_index" not in self._frame_df.columns:
             return None
 
@@ -554,7 +557,9 @@ class FramewiseSidecar:
         relative_valid: list[np.ndarray] = []
         total = len(actions)
         block_size = 4096
-        chunk_offsets = np.arange(int(chunk_size), dtype=np.int64)
+        chunk_offsets = (
+            np.arange(int(chunk_size), dtype=np.int64) * int(action_stride_frames)
+        )
         for block_start in range(0, total, block_size):
             block_end = min(block_start + block_size, total)
             start_indices = np.arange(block_start, block_end, dtype=np.int64)
@@ -578,6 +583,66 @@ class FramewiseSidecar:
         if len(names) < action_dim:
             names.extend([f"action_{idx}" for idx in range(len(names), action_dim)])
         return compute_masked_vector_stats(values, valid, names)
+
+    def relative_state_history_stats(
+        self,
+        *,
+        history_horizon: int,
+        state_names: list[str],
+        relative_action_keyframes: list[str] | None = None,
+        relative_exclude_keys: list[str] | None = None,
+        relative_scalar_state_history_indices: list[int] | None = None,
+    ) -> dict[str, np.ndarray] | None:
+        """Compute stats for state history expressed in each sample's current TCP frame."""
+        self.ensure_loaded()
+        if self._frame_df is None or history_horizon < 1 or "episode_index" not in self._frame_df.columns:
+            return None
+        states = self._values_matrix(OBS_STATE)
+        if states is None:
+            return None
+        masks = self._values_matrix("state_mask")
+        if masks is None:
+            masks = np.ones_like(states, dtype=np.float32)
+        elif masks.shape[1] < states.shape[1]:
+            masks = np.concatenate(
+                [masks, np.ones((masks.shape[0], states.shape[1] - masks.shape[1]), dtype=np.float32)],
+                axis=1,
+            )
+        elif masks.shape[1] > states.shape[1]:
+            masks = masks[:, : states.shape[1]]
+
+        specs = _relative_keyframe_specs(relative_action_keyframes, relative_exclude_keys)
+        episode_ids = self._frame_df["episode_index"].to_numpy(dtype=np.int64)
+        episode_first_index: dict[int, int] = {}
+        for idx, episode_id in enumerate(episode_ids):
+            episode_first_index.setdefault(int(episode_id), idx)
+        first_indices = np.asarray(
+            [episode_first_index[int(episode_id)] for episode_id in episode_ids], dtype=np.int64
+        )
+        current_indices = np.arange(len(states), dtype=np.int64)
+        offsets = np.arange(1 - int(history_horizon), 1, dtype=np.int64)
+        history_indices = np.maximum(current_indices[:, None] + offsets[None, :], first_indices[:, None])
+        histories = _apply_keyframe_relative_np(
+            states[history_indices].copy(), states[current_indices], specs
+        )
+        scalar_indices = list(dict.fromkeys(relative_scalar_state_history_indices or []))
+        if any(index < 0 or index >= states.shape[1] for index in scalar_indices):
+            raise ValueError(
+                "relative_scalar_state_history_indices are outside the state dimension: "
+                f"indices={scalar_indices}, state_dim={states.shape[1]}"
+            )
+        if scalar_indices:
+            current_values = histories[:, -1:, scalar_indices].copy()
+            histories[:, :-1, scalar_indices] -= current_values
+            histories[:, -1:, scalar_indices] = current_values
+        history_masks = masks[history_indices]
+        state_dim = states.shape[1]
+        names = list(state_names[:state_dim])
+        if len(names) < state_dim:
+            names.extend([f"state_{idx}" for idx in range(len(names), state_dim)])
+        return compute_masked_vector_stats(
+            histories.reshape(-1, state_dim), history_masks.reshape(-1, state_dim), names
+        )
 
     def overlay(self, item: dict, abs_idx: int, *, skip_keys: set[str] | None = None) -> dict:
         self.ensure_loaded()
@@ -652,9 +717,9 @@ class FramewiseSidecar:
         if not self._summary:
             return None
         if key == OBS_STATE:
-            names = self._summary.get("state_feature_names")
+            names = self._summary.get("state_feature_names") or self._summary.get("canonical_state_names")
         elif key == ACTION:
-            names = self._summary.get("action_feature_names")
+            names = self._summary.get("action_feature_names") or self._summary.get("canonical_action_names")
         else:
             names = None
         if not isinstance(names, list):

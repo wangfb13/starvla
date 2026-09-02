@@ -21,6 +21,7 @@ TODO(alexander-soare):
 """
 
 import math
+from copy import deepcopy
 from collections import deque
 from collections.abc import Callable
 
@@ -73,6 +74,11 @@ class DiffusionPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.diffusion = DiffusionModel(config)
+        self.ema_diffusion = None
+        if config.use_ema:
+            self.ema_diffusion = deepcopy(self.diffusion)
+            self.ema_diffusion.requires_grad_(False)
+            self.register_buffer("ema_optimization_step", torch.zeros((), dtype=torch.long))
 
         self.reset()
 
@@ -91,11 +97,32 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
+    def update(self) -> None:
+        """Update rollout weights after each optimizer step."""
+        if self.ema_diffusion is None:
+            return
+        self.ema_optimization_step.add_(1)
+        step = float(self.ema_optimization_step.item())
+        decay = 1.0 - (1.0 + step / float(self.config.ema_inv_gamma)) ** (
+            -float(self.config.ema_power)
+        )
+        decay = min(float(self.config.ema_max_value), max(float(self.config.ema_min_value), decay))
+        for ema_param, param in zip(
+            self.ema_diffusion.parameters(), self.diffusion.parameters(), strict=True
+        ):
+            ema_param.lerp_(param.detach(), 1.0 - decay)
+        for ema_buffer, buffer in zip(
+            self.ema_diffusion.buffers(), self.diffusion.buffers(), strict=True
+        ):
+            ema_buffer.copy_(buffer)
+
+    @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         # stack n latest observations from the queue
         batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-        actions = self.diffusion.generate_actions(batch, noise=noise)
+        rollout_model = self.ema_diffusion if self.ema_diffusion is not None else self.diffusion
+        actions = rollout_model.generate_actions(batch, noise=noise)
 
         return actions
 
@@ -147,8 +174,9 @@ class DiffusionPolicy(PreTrainedPolicy):
                     batch[key] = batch[key].unsqueeze(1)
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         loss = self.diffusion.compute_loss(batch)
-        # no output_dict so returning None
-        return loss, None
+        # The shared training loop expects a metrics dictionary, even when the
+        # policy has no auxiliary losses to report.
+        return loss, {}
 
 
 def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
@@ -302,7 +330,10 @@ class DiffusionModel(nn.Module):
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
-        start = n_obs_steps - 1
+        # With UMI sparse future targets, trajectory index zero already means
+        # t + action_gap_frames. The legacy policy includes observation/action
+        # overlap and therefore starts at n_obs_steps - 1.
+        start = 0 if self.config.action_gap_frames is not None else n_obs_steps - 1
         end = start + self.config.n_action_steps
         actions = actions[:, start:end]
 
@@ -337,6 +368,9 @@ class DiffusionModel(nn.Module):
         trajectory = batch[ACTION]
         # Sample noise to add to the trajectory.
         eps = torch.randn(trajectory.shape, device=trajectory.device)
+        noisy_eps = eps
+        if self.config.input_perturb > 0:
+            noisy_eps = eps + float(self.config.input_perturb) * torch.randn_like(eps)
         # Sample a random noising timestep for each item in the batch.
         timesteps = torch.randint(
             low=0,
@@ -345,7 +379,7 @@ class DiffusionModel(nn.Module):
             device=trajectory.device,
         ).long()
         # Add noise to the clean trajectories according to the noise magnitude at each timestep.
-        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
+        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, noisy_eps, timesteps)
 
         # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
         pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
@@ -453,6 +487,23 @@ class DiffusionRgbEncoder(nn.Module):
 
     def __init__(self, config: DiffusionConfig):
         super().__init__()
+        self.is_timm = config.vision_backbone.startswith(("vit", "convnext")) or "." in config.vision_backbone
+        self.color_jitter = None
+        if any(
+            value > 0
+            for value in (
+                config.color_jitter_brightness,
+                config.color_jitter_contrast,
+                config.color_jitter_saturation,
+                config.color_jitter_hue,
+            )
+        ):
+            self.color_jitter = torchvision.transforms.ColorJitter(
+                brightness=config.color_jitter_brightness,
+                contrast=config.color_jitter_contrast,
+                saturation=config.color_jitter_saturation,
+                hue=config.color_jitter_hue,
+            )
         # Set up optional preprocessing.
         if config.resize_shape is not None:
             self.resize = torchvision.transforms.Resize(config.resize_shape)
@@ -471,7 +522,33 @@ class DiffusionRgbEncoder(nn.Module):
         else:
             self.do_crop = False
 
-        # Set up backbone.
+        if self.is_timm:
+            import timm
+
+            self.backbone = timm.create_model(
+                config.vision_backbone,
+                pretrained=config.timm_pretrained,
+                num_classes=0,
+                global_pool="",
+                pretrained_cfg_overlay=(
+                    {"file": config.timm_pretrained_path} if config.timm_pretrained_path else None
+                ),
+            )
+            self.feature_dim = int(self.backbone.num_features)
+            self.register_buffer(
+                "image_mean",
+                torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1),
+            )
+            self.register_buffer(
+                "image_std",
+                torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1),
+            )
+            self.pool = None
+            self.out = None
+            self.relu = None
+            return
+
+        # Set up torchvision backbone.
         backbone_model = getattr(torchvision.models, config.vision_backbone)(
             weights=config.pretrained_backbone_weights
         )
@@ -526,6 +603,19 @@ class DiffusionRgbEncoder(nn.Module):
             else:
                 # Always use center crop for eval.
                 x = self.center_crop(x)
+            # UMI randomly crops 95% then resizes back to the ViT input size.
+            if self.is_timm and self.resize is not None:
+                x = self.resize(x)
+        if self.training and self.color_jitter is not None:
+            x = self.color_jitter(x)
+        if self.is_timm:
+            x = (x - self.image_mean.to(dtype=x.dtype)) / self.image_std.to(dtype=x.dtype)
+            features = self.backbone.forward_features(x)
+            if features.ndim == 3:
+                return features[:, 0]
+            if features.ndim == 4:
+                return features.mean(dim=(-2, -1))
+            return features
         # Extract backbone feature.
         x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
         # Final linear layer with non-linearity.

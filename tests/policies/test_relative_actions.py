@@ -181,6 +181,38 @@ def test_processor_keyframes_do_not_apply_scalar_relative_to_rot6d_twice():
     torch.testing.assert_close(recovered, action, atol=1e-5, rtol=1e-5)
 
 
+def test_state_history_and_action_share_current_tcp_anchor():
+    identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    previous, current = torch.zeros(22), torch.zeros(22)
+    previous[0:3], current[0:3] = torch.tensor([0.9, 2.0, 3.0]), torch.tensor([1.0, 2.0, 3.0])
+    previous[3:9] = current[3:9] = identity_rot6d
+    previous[10:13], current[10:13] = torch.tensor([-1.0, -2.0, 0.5]), torch.tensor([-1.0, -1.8, 0.5])
+    previous[13:19] = current[13:19] = identity_rot6d
+    previous[9], current[9], previous[19], current[19] = 0.3, 0.4, 0.7, 0.6
+    previous[20:22] = current[20:22] = 1.0
+    history = torch.stack([previous, current], dim=0).unsqueeze(0)
+    action = current[:20].reshape(1, 1, 20).repeat(1, 2, 1)
+    action[:, 0, 0] += 0.2
+    action[:, 1, 0] += 0.4
+    action[:, 0, 9] += 0.05
+    action[:, 1, 9] -= 0.05
+    step = RelativeActionsProcessorStep(
+        enabled=True,
+        relative_action_keyframes=["0:3", "10:13"],
+        relative_state_history_to_current=True,
+    )
+    result = step(batch_to_transition({ACTION: action, OBS_STATE: history}))
+    model_state = result[TransitionKey.OBSERVATION][OBS_STATE]
+    relative_action = result[TransitionKey.ACTION]
+    torch.testing.assert_close(model_state[:, 0, 0:3], torch.tensor([[-0.1, 0.0, 0.0]]))
+    torch.testing.assert_close(model_state[:, 1, 0:3], torch.zeros(1, 3))
+    torch.testing.assert_close(model_state[:, 1, 3:9], identity_rot6d.unsqueeze(0))
+    torch.testing.assert_close(model_state[:, 0, 10:13], torch.tensor([[0.0, -0.2, 0.0]]))
+    torch.testing.assert_close(relative_action[:, :, 0], torch.tensor([[0.2, 0.4]]))
+    torch.testing.assert_close(relative_action[:, :, 9], torch.tensor([[0.05, -0.05]]))
+    torch.testing.assert_close(step._last_state, current.unsqueeze(0))
+
+
 def test_online_episode_anchor_state_keeps_raw_state_for_action_decode():
     identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
     z90_rot6d = torch.tensor([0.0, 1.0, 0.0, -1.0, 0.0, 0.0])

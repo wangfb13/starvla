@@ -164,6 +164,30 @@ def test_framewise_sidecar_dynamic_relative_action_chunk_stats(tmp_path):
     assert stats["count"].tolist() == [6.0]
 
 
+def test_framewise_sidecar_relative_state_history_stats_uses_current_anchor(tmp_path):
+    sidecar_path = tmp_path / "framewise_guidance.parquet"
+    identity_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    rows = [
+        {
+            "index": index,
+            "episode_index": 0,
+            OBS_STATE: np.array([x, 0.0, 0.0, *identity_rot6d, 0.5], dtype=np.float32),
+            "state_mask": np.ones(10, dtype=np.float32),
+        }
+        for index, x in enumerate([1.0, 2.0])
+    ]
+    pd.DataFrame(rows).to_parquet(sidecar_path, index=False)
+    stats = FramewiseSidecar(sidecar_path).relative_state_history_stats(
+        history_horizon=2,
+        state_names=[f"state_{idx}" for idx in range(10)],
+        relative_action_keyframes=["0:3"],
+    )
+    assert stats is not None
+    assert stats["min"][0] == -1.0
+    assert stats["max"][0] == 0.0
+    assert stats["mean"][0] == -0.25
+
+
 def test_framewise_sidecar_dynamic_keyframe_rot6d_relative_stats(tmp_path):
     sidecar_path = tmp_path / "framewise_guidance.parquet"
     identity_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)

@@ -41,6 +41,20 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     dtype: str = "bfloat16"  # backbone load dtype: "bfloat16" | "float32"
 
     n_obs_steps: int = 1
+    # Number of low-dimensional observation states supplied to the action head.
+    # History is sampled at consecutive observation frames and remains a separate
+    # token axis: [B, state_history_horizon, state_dim]. Images stay single-frame
+    # because the current QwenGR00T visual bridge has no temporal-image interface.
+    state_history_horizon: int = 1
+    # Express every pose in the state history in the final observation TCP frame.
+    # With horizon=2 this produces [T_t^-1 T_{t-1}, I].
+    relative_state_history_to_current: bool = False
+    # Scalar state dimensions represented as [history-current, current absolute].
+    # For canonical bimanual UMI state, grippers are indices 9 and 19.
+    relative_scalar_state_history_indices: list[int] = field(default_factory=list)
+    # Exclude episode-tail samples that cannot provide a complete action chunk.
+    # The offline trainer forwards this value to EpisodeAwareSampler.
+    drop_n_last_frames: int = 0
     chunk_size: int = 32  # action_horizon: number of action steps predicted by the head
     n_action_steps: int = 16  # number of action steps executed before re-planning
     # Number of earliest predicted steps to drop from each action chunk during online execution.
@@ -159,6 +173,29 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             raise ValueError(
                 f"n_action_steps ({self.n_action_steps}) cannot be greater than chunk_size ({self.chunk_size})"
             )
+        if self.drop_n_last_frames < 0:
+            raise ValueError("drop_n_last_frames must be non-negative.")
+        if self.state_history_horizon < 1:
+            raise ValueError("state_history_horizon must be at least 1.")
+        if self.relative_state_history_to_current and self.state_history_horizon < 2:
+            raise ValueError(
+                "relative_state_history_to_current requires state_history_horizon >= 2."
+            )
+        if self.relative_state_history_to_current and not self.relative_action_keyframes:
+            raise ValueError(
+                "relative_state_history_to_current requires relative_action_keyframes."
+            )
+        if self.relative_state_history_to_current and self.online_anchor_state_to_episode_start:
+            raise ValueError(
+                "relative_state_history_to_current and online_anchor_state_to_episode_start "
+                "are mutually exclusive."
+            )
+        if self.relative_scalar_state_history_indices and not self.relative_state_history_to_current:
+            raise ValueError(
+                "relative_scalar_state_history_indices requires relative_state_history_to_current=True."
+            )
+        if any(index < 0 for index in self.relative_scalar_state_history_indices):
+            raise ValueError("relative_scalar_state_history_indices must be non-negative.")
         if self.action_execution_skip_start_steps < 0:
             raise ValueError("action_execution_skip_start_steps must be non-negative.")
         if self.action_execution_skip_start_steps >= self.n_action_steps:
@@ -283,6 +320,11 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     def observation_delta_indices(self) -> None:
         return None
 
+    def get_observation_delta_indices(self, feature_key: str) -> list | None:
+        if feature_key == OBS_STATE:
+            return list(range(1 - self.state_history_horizon, 1))
+        return None
+
     @property
     def action_delta_indices(self) -> list:
         start = int(self.action_gap_frames)
@@ -324,5 +366,8 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     @property
     def requires_state_feature(self) -> bool:
         return self.state_mode != "none" and (
-            self.use_state_input or self.use_relative_actions or self.canonicalize_bimanual_rot6d
+            self.use_state_input
+            or self.use_relative_actions
+            or self.relative_state_history_to_current
+            or self.canonicalize_bimanual_rot6d
         )

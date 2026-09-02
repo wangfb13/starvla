@@ -164,7 +164,7 @@ def update_policy(
     ):
         if metric_name in output_dict and metric_name in train_metrics.metrics:
             setattr(train_metrics, metric_name, output_dict[metric_name])
-    train_metrics.grad_norm = grad_norm.item()
+    train_metrics.grad_norm = float(grad_norm)
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
@@ -202,6 +202,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         force_cpu = cfg.policy.device == "cpu"
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
+            gradient_accumulation_steps=max(1, int(cfg.gradient_accumulation_steps)),
             kwargs_handlers=[ddp_kwargs],
             cpu=force_cpu,
         )
@@ -257,11 +258,32 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
     if is_main_process:
         logging.info("Creating policy")
-    policy = make_policy(
-        cfg=cfg.policy,
-        ds_meta=dataset.meta,
-        rename_map=cfg.rename_map,
+
+    # Accelerate registers the stage-3 config with Transformers even when
+    # zero3_init_flag is false. Transformers 5.3 then attempts its ZeRO-3
+    # initialization path while constructing SigLIP and passes partitioned
+    # 1-D tensors to xavier_uniform_. Build/load the complete pretrained model
+    # normally, then restore the DeepSpeed registration before prepare() so
+    # the actual training engine still uses ZeRO-3.
+    deepspeed_plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    bypass_transformers_zero3_init = (
+        deepspeed_plugin is not None
+        and str(accelerator.distributed_type).upper().endswith("DEEPSPEED")
+        and not deepspeed_plugin.is_zero3_init_enabled()
     )
+    if bypass_transformers_zero3_init:
+        from transformers.integrations import unset_hf_deepspeed_config
+
+        unset_hf_deepspeed_config()
+    try:
+        policy = make_policy(
+            cfg=cfg.policy,
+            ds_meta=dataset.meta,
+            rename_map=cfg.rename_map,
+        )
+    finally:
+        if bypass_transformers_zero3_init:
+            deepspeed_plugin.set_deepspeed_weakref()
 
     if cfg.peft is not None:
         logging.info("Using PEFT! Wrapping model.")
@@ -544,6 +566,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             train_tracker.reset_averages()
 
         if cfg.save_checkpoint and is_saving_step:
+            is_deepspeed = str(accelerator.distributed_type).upper().endswith("DEEPSPEED")
+            policy_state_dict = accelerator.get_state_dict(policy) if is_deepspeed else None
             if is_main_process:
                 logging.info(f"Checkpoint policy after step {step}")
                 checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
@@ -552,10 +576,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     step=step,
                     cfg=cfg,
                     policy=accelerator.unwrap_model(policy),
-                    optimizer=optimizer,
+                    optimizer=None if is_deepspeed else optimizer,
                     scheduler=lr_scheduler,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
+                    policy_state_dict=policy_state_dict,
                 )
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:

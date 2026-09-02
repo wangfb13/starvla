@@ -67,9 +67,8 @@ SUBTASK_EPISODE_PATTERN = re.compile(r"(?:^|_)ep(\d+)(?:_|$)")
 DEFAULT_SCHEMA_NAME = "pi05_canonical_bimanual_rot6d_v1"
 REAL_ROBOT_TYPES = {"spark3_pose_gripper"}
 UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper", "dual_ugripper_v2_5"}
-UMI_GRIPPER_RAW_MIN = -0.436
 UMI_GRIPPER_RAW_MAX = 0.0
-UMI_GRIPPER_NORMALIZATION_DENOMINATOR = -0.436
+DEFAULT_UMI_GRIPPER_OPEN_ABS = 0.436
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +94,34 @@ def parse_args() -> argparse.Namespace:
         help=(
             "`auto` infers from meta/info.json robot_type. `umi` converts pose state/action to each episode "
             "anchor frame; `real` keeps pose in dataset frame."
+        ),
+    )
+    parser.add_argument(
+        "--umi-pose-frame",
+        choices=["episode_anchor", "absolute"],
+        default="episode_anchor",
+        help=(
+            "Pose frame used for UMI datasets. `episode_anchor` preserves the legacy behavior; "
+            "`absolute` keeps xyz/orientation in the dataset (QR-world) frame while still applying "
+            "UMI gripper normalization."
+        ),
+    )
+    parser.add_argument(
+        "--umi-gripper-normalization",
+        choices=["fixed", "data_min"],
+        default="fixed",
+        help=(
+            "`fixed` uses --umi-gripper-open-abs for both arms. `data_min` computes a separate "
+            "fully-open magnitude for each arm from all valid state/action gripper values."
+        ),
+    )
+    parser.add_argument(
+        "--umi-gripper-open-abs",
+        type=float,
+        default=DEFAULT_UMI_GRIPPER_OPEN_ABS,
+        help=(
+            "Positive magnitude of the raw UMI gripper value treated as fully open. "
+            "Values are clipped to [-value, 0] and divided by -value."
         ),
     )
     parser.add_argument(
@@ -173,6 +200,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.dataset_root and not args.dataset_roots_file:
         parser.error("At least one --dataset-root or --dataset-roots-file is required.")
+    if args.umi_gripper_open_abs <= 0:
+        parser.error("--umi-gripper-open-abs must be positive.")
     return args
 
 
@@ -298,17 +327,50 @@ def take_columns_with_aliases(
     return values, valid
 
 
-def normalize_umi_gripper(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
+def normalize_umi_gripper(
+    values: np.ndarray,
+    valid: np.ndarray,
+    *,
+    gripper_open_abs: float,
+) -> np.ndarray:
     normalized = np.asarray(values, dtype=np.float32).copy()
     use = np.asarray(valid, dtype=bool)
+    raw_min = -float(gripper_open_abs)
     normalized[use] = (
-        np.clip(normalized[use], UMI_GRIPPER_RAW_MIN, UMI_GRIPPER_RAW_MAX)
-        / UMI_GRIPPER_NORMALIZATION_DENOMINATOR
+        np.clip(normalized[use], raw_min, UMI_GRIPPER_RAW_MAX)
+        / raw_min
     )
     normalized[use] = np.clip(normalized[use], 0.0, 1.0)
     normalized[use] = normalized[use] + 0.0
     normalized[~use] = 0.0
     return normalized.astype(np.float32)
+
+
+def resolve_umi_gripper_open_abs(
+    *,
+    state_values: np.ndarray,
+    state_valid: np.ndarray,
+    action_values: np.ndarray,
+    action_valid: np.ndarray,
+    normalization: str,
+    fixed_open_abs: float,
+) -> float:
+    if normalization == "fixed":
+        return float(fixed_open_abs)
+
+    valid_values = np.concatenate(
+        [state_values[np.asarray(state_valid, dtype=bool)], action_values[np.asarray(action_valid, dtype=bool)]]
+    ).astype(np.float64)
+    valid_values = valid_values[np.isfinite(valid_values)]
+    if valid_values.size == 0:
+        raise ValueError("Cannot compute data-min UMI gripper normalization: no valid values were found.")
+    raw_min = float(valid_values.min())
+    if raw_min >= 0.0:
+        raise ValueError(
+            "Cannot compute data-min UMI gripper normalization: expected a negative raw minimum, "
+            f"got {raw_min}."
+        )
+    return -raw_min
 
 
 def quat_to_matrix(quat_xyzw: np.ndarray) -> np.ndarray:
@@ -420,6 +482,9 @@ def build_state_action_from_raw(
     frame_df: pd.DataFrame,
     info: dict[str, Any],
     dataset_type: str,
+    umi_pose_frame: str,
+    umi_gripper_normalization: str,
+    umi_gripper_open_abs: float,
     missing_value: float,
     real_mask_arm: str = "none",
 ) -> dict[str, np.ndarray]:
@@ -438,6 +503,7 @@ def build_state_action_from_raw(
     action_arms: list[np.ndarray] = []
     action_masks: list[np.ndarray] = []
     arm_anchor_counts: dict[str, int] = {}
+    gripper_open_abs_by_arm: dict[str, float] = {}
 
     for arm in ARM_NAMES:
         pose_state, pose_state_valid = take_columns_with_aliases(
@@ -465,7 +531,25 @@ def build_state_action_from_raw(
             missing_value=missing_value,
         )
 
+        arm_gripper_open_abs = float(umi_gripper_open_abs)
         if dataset_type == "umi":
+            arm_gripper_open_abs = resolve_umi_gripper_open_abs(
+                state_values=grip_state,
+                state_valid=grip_state_valid,
+                action_values=grip_action,
+                action_valid=grip_action_valid,
+                normalization=umi_gripper_normalization,
+                fixed_open_abs=umi_gripper_open_abs,
+            )
+            gripper_open_abs_by_arm[arm] = arm_gripper_open_abs
+            LOGGER.info(
+                "UMI gripper normalization arm=%s mode=%s raw_min=%s raw_zero=0.0",
+                arm,
+                umi_gripper_normalization,
+                -arm_gripper_open_abs,
+            )
+
+        if dataset_type == "umi" and umi_pose_frame == "episode_anchor":
             anchor_by_episode = collect_episode_anchor_poses(
                 episode_ids=episode_ids,
                 pose_values=pose_state,
@@ -483,8 +567,12 @@ def build_state_action_from_raw(
                 pose_valid=pose_action_valid,
                 anchor_by_episode=anchor_by_episode,
             )
-            grip_state = normalize_umi_gripper(grip_state, grip_state_valid)
-            grip_action = normalize_umi_gripper(grip_action, grip_action_valid)
+            grip_state = normalize_umi_gripper(
+                grip_state, grip_state_valid, gripper_open_abs=arm_gripper_open_abs
+            )
+            grip_action = normalize_umi_gripper(
+                grip_action, grip_action_valid, gripper_open_abs=arm_gripper_open_abs
+            )
             arm_anchor_counts[arm] = len(anchor_by_episode)
         else:
             compact_state_pose, compact_state_pose_valid = build_pose_absolute_rot6d(
@@ -495,6 +583,13 @@ def build_state_action_from_raw(
                 pose_action,
                 pose_action_valid,
             )
+            if dataset_type == "umi":
+                grip_state = normalize_umi_gripper(
+                    grip_state, grip_state_valid, gripper_open_abs=arm_gripper_open_abs
+                )
+                grip_action = normalize_umi_gripper(
+                    grip_action, grip_action_valid, gripper_open_abs=arm_gripper_open_abs
+                )
             arm_anchor_counts[arm] = 0
 
         state_arm = np.concatenate([compact_state_pose, grip_state], axis=1).astype(np.float32)
@@ -551,6 +646,7 @@ def build_state_action_from_raw(
         "left_present": arm_present_mask[:, 0],
         "right_present": arm_present_mask[:, 1],
         "arm_anchor_counts": arm_anchor_counts,
+        "gripper_open_abs_by_arm": gripper_open_abs_by_arm,
     }
 
 
@@ -934,6 +1030,9 @@ def build_sidecar_for_dataset(
     *,
     dataset_root: Path,
     requested_dataset_type: str,
+    umi_pose_frame: str,
+    umi_gripper_normalization: str,
+    umi_gripper_open_abs: float,
     real_mask_arm: str,
     output_root: Path,
     schema_name: str,
@@ -976,6 +1075,9 @@ def build_sidecar_for_dataset(
         frame_df=frame_df,
         info=info,
         dataset_type=dataset_type,
+        umi_pose_frame=umi_pose_frame,
+        umi_gripper_normalization=umi_gripper_normalization,
+        umi_gripper_open_abs=umi_gripper_open_abs,
         missing_value=missing_value,
         real_mask_arm=real_mask_arm,
     )
@@ -1045,6 +1147,7 @@ def build_sidecar_for_dataset(
     summary = {
         "dataset_root": str(dataset_root),
         "dataset_type": dataset_type,
+        "umi_pose_frame": umi_pose_frame if dataset_type == "umi" else None,
         "real_mask_arm": real_mask_arm if dataset_type == "real" else "none",
         "robot_type": info.get("robot_type"),
         "schema_name": schema_name,
@@ -1057,11 +1160,27 @@ def build_sidecar_for_dataset(
         "canonical_action_dim": CANONICAL_ACTION_DIM,
         "canonical_state_names": canonical_state_feature_names(),
         "canonical_action_names": canonical_action_feature_names(),
-        "state_pose_mode": "episode_anchor_relative_rot6d" if dataset_type == "umi" else "absolute_rot6d",
-        "gripper_mode": "clip_raw_to_[-0.436,0.0]_divide_by_-0.436" if dataset_type == "umi" else "framewise_raw",
-        "action_target_mode": "episode_anchor_relative_rot6d_gripper_framewise"
-        if dataset_type == "umi"
-        else "absolute_rot6d_gripper_framewise",
+        "state_pose_mode": (
+            "episode_anchor_relative_rot6d"
+            if dataset_type == "umi" and umi_pose_frame == "episode_anchor"
+            else "absolute_rot6d"
+        ),
+        "gripper_mode": (
+            "per_arm_data_min_to_1_zero_to_0"
+            if dataset_type == "umi" and umi_gripper_normalization == "data_min"
+            else f"clip_raw_to_[{-umi_gripper_open_abs},0.0]_divide_by_{-umi_gripper_open_abs}"
+            if dataset_type == "umi"
+            else "framewise_raw"
+        ),
+        "umi_gripper_normalization": umi_gripper_normalization if dataset_type == "umi" else None,
+        "umi_gripper_open_abs": (
+            canonical["gripper_open_abs_by_arm"] if dataset_type == "umi" else None
+        ),
+        "action_target_mode": (
+            "episode_anchor_relative_rot6d_gripper_framewise"
+            if dataset_type == "umi" and umi_pose_frame == "episode_anchor"
+            else "absolute_rot6d_gripper_framewise"
+        ),
         "missing_value": missing_value,
         "left_arm_present_ratio": float(canonical["left_present"].mean()),
         "right_arm_present_ratio": float(canonical["right_present"].mean()),
@@ -1074,13 +1193,17 @@ def build_sidecar_for_dataset(
         "next_subtask_text_nonempty_ratio": float((pd.Series(next_subtask_text).astype(str).str.strip() != "").mean()),
         "recommended_policy": {
             "canonicalize_bimanual_rot6d": False,
-            "use_relative_actions": True,
-            "relative_action_keyframes": [
-                item.strip() for item in relative_action_keyframes.split(",") if item.strip()
-            ],
-            "relative_exclude_joints": parse_csv_tokens(relative_exclude_joints),
+            "use_relative_actions": umi_pose_frame != "absolute",
+            "relative_action_keyframes": (
+                []
+                if umi_pose_frame == "absolute"
+                else [item.strip() for item in relative_action_keyframes.split(",") if item.strip()]
+            ),
+            "relative_exclude_joints": (
+                [] if umi_pose_frame == "absolute" else parse_csv_tokens(relative_exclude_joints)
+            ),
             "action_gap_frames": relative_stats_action_gap_frames,
-            "use_state_input": False,
+            "use_state_input": True,
             "action_valid_mask_key": "action_valid_mask",
             "state_present_key": "state_present",
             "max_state_dim": CANONICAL_STATE_DIM,
@@ -1119,6 +1242,9 @@ def main() -> None:
             build_sidecar_for_dataset(
                 dataset_root=dataset_root,
                 requested_dataset_type=args.dataset_type,
+                umi_pose_frame=args.umi_pose_frame,
+                umi_gripper_normalization=args.umi_gripper_normalization,
+                umi_gripper_open_abs=args.umi_gripper_open_abs,
                 real_mask_arm=args.real_mask_arm,
                 output_root=args.output_root,
                 schema_name=args.schema_name,
@@ -1135,6 +1261,9 @@ def main() -> None:
     manifest = {
         "schema_name": args.schema_name,
         "requested_dataset_type": args.dataset_type,
+        "umi_pose_frame": args.umi_pose_frame,
+        "umi_gripper_normalization": args.umi_gripper_normalization,
+        "umi_gripper_open_abs": args.umi_gripper_open_abs,
         "dataset_count": len(summaries),
         "dataset_roots_file": [str(path) for path in args.dataset_roots_file],
         "sidecar_path_map": {

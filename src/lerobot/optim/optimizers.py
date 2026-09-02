@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import abc
+import json
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -21,7 +22,8 @@ from typing import Any
 
 import draccus
 import torch
-from safetensors.torch import load_file, save_file
+from huggingface_hub import save_torch_state_dict
+from safetensors.torch import load_file
 
 from lerobot.datasets.io_utils import write_json
 from lerobot.datasets.utils import flatten_dict, unflatten_dict
@@ -306,7 +308,12 @@ def _save_single_optimizer_state(optimizer: torch.optim.Optimizer, save_dir: Pat
     state = optimizer.state_dict()
     param_groups = state.pop("param_groups")
     flat_state = flatten_dict(state)
-    save_file(flat_state, save_dir / OPTIMIZER_STATE)
+    save_torch_state_dict(
+        flat_state,
+        save_dir,
+        filename_pattern="optimizer_state{suffix}.safetensors",
+        max_shard_size="1GB",
+    )
     write_json(param_groups, save_dir / OPTIMIZER_PARAM_GROUPS)
 
 
@@ -340,7 +347,16 @@ def load_optimizer_state(
 def _load_single_optimizer_state(optimizer: torch.optim.Optimizer, save_dir: Path) -> torch.optim.Optimizer:
     """Load a single optimizer's state from disk."""
     current_state_dict = optimizer.state_dict()
-    flat_state = load_file(save_dir / OPTIMIZER_STATE)
+    optimizer_file = save_dir / OPTIMIZER_STATE
+    if optimizer_file.is_file():
+        flat_state = load_file(optimizer_file)
+    else:
+        index_file = save_dir / f"{OPTIMIZER_STATE}.index.json"
+        with index_file.open() as f:
+            weight_map = json.load(f)["weight_map"]
+        flat_state = {}
+        for shard_name in sorted(set(weight_map.values())):
+            flat_state.update(load_file(save_dir / shard_name))
     state = unflatten_dict(flat_state)
 
     # Handle case where 'state' key might not exist (for newly created optimizers)

@@ -21,11 +21,13 @@ import torch
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
+    AbsoluteActionsProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     RenameObservationsProcessorStep,
+    RelativeActionsProcessorStep,
     UnnormalizerProcessorStep,
 )
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
@@ -62,20 +64,31 @@ def make_diffusion_pre_post_processors(
         A tuple containing the configured pre-processor and post-processor pipelines.
     """
 
+    relative_step = RelativeActionsProcessorStep(
+        enabled=config.use_relative_actions,
+        exclude_joints=config.relative_exclude_joints,
+        action_names=config.action_feature_names,
+        relative_action_keyframes=config.relative_action_keyframes,
+        relative_exclude_keys=config.relative_exclude_keys,
+        relative_state_history_to_current=config.relative_state_history_to_current,
+    )
+
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
-        DeviceProcessorStep(device=config.device),
+        relative_step,
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
         ),
+        DeviceProcessorStep(device=config.device),
     ]
     output_steps = [
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
+        AbsoluteActionsProcessorStep(enabled=config.use_relative_actions, relative_step=relative_step),
         DeviceProcessorStep(device="cpu"),
     ]
     return (

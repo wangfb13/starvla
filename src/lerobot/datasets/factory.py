@@ -291,6 +291,7 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
     use_relative_actions = bool(getattr(cfg.policy, "use_relative_actions", False))
     relative_chunk_size = getattr(cfg.policy, "chunk_size", None)
     default_relative_action_gap_frames = getattr(cfg.policy, "action_gap_frames", None)
+    relative_action_stride_frames = int(getattr(cfg.policy, "action_stride_frames", 1))
     relative_exclude_joints = getattr(cfg.policy, "relative_exclude_joints", None) or []
     relative_action_keyframes = getattr(cfg.policy, "relative_action_keyframes", None) or []
     relative_exclude_keys = getattr(cfg.policy, "relative_exclude_keys", None) or []
@@ -354,6 +355,7 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
         action_stats = sidecar.relative_action_chunk_stats(
             chunk_size=int(relative_chunk_size),
             action_gap_frames=int(gap_frames or 0),
+            action_stride_frames=relative_action_stride_frames,
             action_names=list(action_names),
             relative_exclude_joints=relative_exclude_joints,
             relative_action_keyframes=list(relative_action_keyframes),
@@ -365,14 +367,28 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
                 f"state_{idx}"
                 for idx in range(child_dataset.meta.features["observation.state"]["shape"][0])
             ]
-        state_stats = sidecar.masked_vector_stats("observation.state", "state_mask", state_names)
+        if bool(getattr(cfg.policy, "relative_state_history_to_current", False)):
+            state_stats = sidecar.relative_state_history_stats(
+                history_horizon=int(
+                    getattr(cfg.policy, "state_history_horizon", getattr(cfg.policy, "n_obs_steps", 1))
+                ),
+                state_names=state_names,
+                relative_action_keyframes=list(relative_action_keyframes),
+                relative_exclude_keys=list(relative_exclude_keys),
+                relative_scalar_state_history_indices=list(
+                    getattr(cfg.policy, "relative_scalar_state_history_indices", [])
+                ),
+            )
+        else:
+            state_stats = sidecar.masked_vector_stats("observation.state", "state_mask", state_names)
         if action_stats is None or state_stats is None:
             return None
         logging.info(
-            "Computed dynamic sidecar relative stats for %s (chunk_size=%s, gap=%s).",
+            "Computed dynamic sidecar relative stats for %s (chunk_size=%s, gap=%s, stride=%s).",
             child_dataset.root,
             relative_chunk_size,
             gap_frames,
+            relative_action_stride_frames,
         )
         return {"observation.state": state_stats, ACTION: action_stats}
 
@@ -476,8 +492,13 @@ def resolve_delta_timestamps(
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
         if key == ACTION and action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in action_delta_indices]
-        if key.startswith(OBS_PREFIX) and cfg.observation_delta_indices is not None:
-            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
+        if key.startswith(OBS_PREFIX):
+            observation_indices = cfg.observation_delta_indices
+            getter = getattr(cfg, "get_observation_delta_indices", None)
+            if callable(getter):
+                observation_indices = getter(key)
+            if observation_indices is not None:
+                delta_timestamps[key] = [i / ds_meta.fps for i in observation_indices]
 
     if len(delta_timestamps) == 0:
         delta_timestamps = None
