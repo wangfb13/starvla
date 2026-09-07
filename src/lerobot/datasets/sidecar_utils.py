@@ -307,6 +307,35 @@ def _apply_keyframe_relative_np(
     return output_seq
 
 
+def _add_left_wrt_current_right_pose_np(
+    state_history: np.ndarray,
+    *,
+    output_start: int = 22,
+) -> np.ndarray:
+    """Numpy equivalent of the online UMI inter-gripper history transform."""
+    required_dim = output_start + 9
+    if state_history.ndim != 3 or state_history.shape[-1] < required_dim:
+        raise ValueError(
+            f"Inter-arm state expects [N,H,D] with D>={required_dim}, got {state_history.shape}"
+        )
+    result = state_history.copy()
+    left_pos = state_history[..., 0:3]
+    left_rot = _rot6d_to_matrix_np(state_history[..., 3:9])
+    current_right_pos = state_history[:, -1:, 10:13]
+    current_right_rot = _rot6d_to_matrix_np(state_history[:, -1:, 13:19])
+    current_right_rot_t = np.swapaxes(current_right_rot, -1, -2)
+    relative_pos = np.matmul(
+        current_right_rot_t, (left_pos - current_right_pos)[..., None]
+    ).squeeze(-1)
+    relative_rot = np.matmul(current_right_rot_t, left_rot)
+    relative_pose = np.concatenate(
+        [relative_pos, _matrix_to_rot6d_np(relative_rot)], axis=-1
+    ).astype(np.float32)
+    valid = (state_history[..., 20] > 0.5) & (state_history[:, -1:, 21] > 0.5)
+    result[..., output_start : output_start + 9] = relative_pose * valid[..., None]
+    return result
+
+
 def _default_value_for_series(series: pd.Series) -> object:
     dtype = series.dtype
     if pd.api.types.is_bool_dtype(dtype):
@@ -592,6 +621,8 @@ class FramewiseSidecar:
         relative_action_keyframes: list[str] | None = None,
         relative_exclude_keys: list[str] | None = None,
         relative_scalar_state_history_indices: list[int] | None = None,
+        inter_arm_relative_state: bool = False,
+        inter_arm_state_start: int = 22,
     ) -> dict[str, np.ndarray] | None:
         """Compute stats for state history expressed in each sample's current TCP frame."""
         self.ensure_loaded()
@@ -622,9 +653,12 @@ class FramewiseSidecar:
         current_indices = np.arange(len(states), dtype=np.int64)
         offsets = np.arange(1 - int(history_horizon), 1, dtype=np.int64)
         history_indices = np.maximum(current_indices[:, None] + offsets[None, :], first_indices[:, None])
-        histories = _apply_keyframe_relative_np(
-            states[history_indices].copy(), states[current_indices], specs
-        )
+        histories = states[history_indices].copy()
+        if inter_arm_relative_state:
+            histories = _add_left_wrt_current_right_pose_np(
+                histories, output_start=inter_arm_state_start
+            )
+        histories = _apply_keyframe_relative_np(histories, states[current_indices], specs)
         scalar_indices = list(dict.fromkeys(relative_scalar_state_history_indices or []))
         if any(index < 0 or index >= states.shape[1] for index in scalar_indices):
             raise ValueError(

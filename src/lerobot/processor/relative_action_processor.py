@@ -64,6 +64,63 @@ def _matrix_to_rotation_6d(rot_mats: Tensor) -> Tensor:
     return torch.cat((col1, col2), dim=-1)
 
 
+def add_left_wrt_current_right_pose(
+    state_history: Tensor,
+    *,
+    output_start: int = 22,
+    left_pos_start: int = 0,
+    left_rot_start: int = 3,
+    right_pos_start: int = 10,
+    right_rot_start: int = 13,
+    left_valid_index: int = 20,
+    right_valid_index: int = 21,
+) -> Tensor:
+    """Write ``inv(T_right,current) @ T_left,history`` as xyz+rot6d.
+
+    This matches UMI's inter-gripper proprioception convention: every historical
+    left pose is expressed in the other gripper's final/current observation frame.
+    """
+    if state_history.ndim != 3 or state_history.shape[-2] < 1:
+        raise ValueError(f"Expected state history [B,H,D], got {tuple(state_history.shape)}")
+    required_dim = max(
+        output_start + 9,
+        left_pos_start + 3,
+        left_rot_start + 6,
+        right_pos_start + 3,
+        right_rot_start + 6,
+        left_valid_index + 1,
+        right_valid_index + 1,
+    )
+    if state_history.shape[-1] < required_dim:
+        raise ValueError(
+            f"Inter-arm relative state requires at least {required_dim} dims, "
+            f"got {state_history.shape[-1]}"
+        )
+
+    result = state_history.clone()
+    left_pos = state_history[..., left_pos_start : left_pos_start + 3]
+    left_rot = _rotation_6d_to_matrix(
+        state_history[..., left_rot_start : left_rot_start + 6]
+    )
+    current_right_pos = state_history[:, -1:, right_pos_start : right_pos_start + 3]
+    current_right_rot = _rotation_6d_to_matrix(
+        state_history[:, -1:, right_rot_start : right_rot_start + 6]
+    )
+    current_right_rot_t = current_right_rot.transpose(-1, -2)
+    relative_pos = torch.matmul(
+        current_right_rot_t, (left_pos - current_right_pos).unsqueeze(-1)
+    ).squeeze(-1)
+    relative_rot = torch.matmul(current_right_rot_t, left_rot)
+    relative_pose = torch.cat([relative_pos, _matrix_to_rotation_6d(relative_rot)], dim=-1)
+
+    valid = (
+        (state_history[..., left_valid_index] > 0.5)
+        & (state_history[:, -1:, right_valid_index] > 0.5)
+    )
+    result[..., output_start : output_start + 9] = relative_pose * valid.unsqueeze(-1)
+    return result
+
+
 def _parse_keyframe_spec(spec: str) -> tuple[int, int]:
     parts = str(spec).split(":")
     if len(parts) != 2:
@@ -296,6 +353,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
     relative_exclude_keys: list[str] = field(default_factory=list)
     relative_state_history_to_current: bool = False
     relative_scalar_state_history_indices: list[int] = field(default_factory=list)
+    inter_arm_relative_state: bool = False
+    inter_arm_state_start: int = 22
     # Inference-only adapter for checkpoints whose DiT state was trained in an
     # episode-start anchor frame.  The raw state remains cached in _last_state so
     # AbsoluteActionsProcessorStep still decodes local actions in the robot base frame.
@@ -444,6 +503,10 @@ class RelativeActionsProcessorStep(ProcessorStep):
         # Training sidecars already contain episode-anchor-relative state. Apply
         # this conversion only to observation-only online inference transitions.
         if self.relative_state_history_to_current and model_state is not None:
+            if self.inter_arm_relative_state:
+                model_state = add_left_wrt_current_right_pose(
+                    model_state, output_start=self.inter_arm_state_start
+                )
             model_state = to_keyframe_relative_actions(
                 model_state,
                 model_state[:, -1, :],
@@ -520,6 +583,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "relative_exclude_keys": self.relative_exclude_keys,
             "relative_state_history_to_current": self.relative_state_history_to_current,
             "relative_scalar_state_history_indices": self.relative_scalar_state_history_indices,
+            "inter_arm_relative_state": self.inter_arm_relative_state,
+            "inter_arm_state_start": self.inter_arm_state_start,
             "online_anchor_state_to_episode_start": self.online_anchor_state_to_episode_start,
             "online_gripper_umi_open_values": self.online_gripper_umi_open_values,
             "online_gripper_open_latch": self.online_gripper_open_latch,

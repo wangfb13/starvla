@@ -73,6 +73,17 @@ class StarVLAPolicy(PreTrainedPolicy):
         apply_config_compat(official_cfg)
         self.starvla_config = official_cfg
         self.starvla_model = self._build_selected_framework(official_cfg, FRAMEWORK_REGISTRY)
+        if config.gradient_checkpointing:
+            qwen_interface = getattr(self.starvla_model, "qwen_vl_interface", None)
+            qwen_model = getattr(qwen_interface, "model", None)
+            if qwen_model is None or not hasattr(qwen_model, "gradient_checkpointing_enable"):
+                raise AttributeError(
+                    f"StarVLA framework {config.framework_name!r} does not expose a "
+                    "gradient-checkpointable Qwen model."
+                )
+            qwen_model.gradient_checkpointing_enable()
+            if hasattr(qwen_model, "config"):
+                qwen_model.config.use_cache = False
         if config.freeze_vlm:
             self._freeze_vlm_backbone()
         self.to(config.device)
@@ -141,6 +152,8 @@ class StarVLAPolicy(PreTrainedPolicy):
         return 1
 
     def _get_tasks(self, batch: dict[str, Any], bsize: int) -> list[str]:
+        if self.config.task_override:
+            return [str(self.config.task_override)] * bsize
         tasks = batch.get(self.config.task_key)
         if tasks is None:
             tasks = batch.get("task")
@@ -154,6 +167,7 @@ class StarVLAPolicy(PreTrainedPolicy):
         image_keys = self._image_keys()
         bsize = self._batch_size(batch)
         tasks = self._get_tasks(batch, bsize)
+        model_state = self._get_model_state(batch)
 
         examples: list[dict[str, Any]] = []
         for batch_idx in range(bsize):
@@ -166,8 +180,8 @@ class StarVLAPolicy(PreTrainedPolicy):
                 "image": images,
                 "lang": tasks[batch_idx] if batch_idx < len(tasks) else "",
             }
-            if self.config.use_state_input and OBS_STATE in batch:
-                state = batch[OBS_STATE][batch_idx].detach().to("cpu").numpy()
+            if model_state is not None:
+                state = model_state[batch_idx].detach().to("cpu").numpy()
                 if state.ndim == 1:
                     state = state[None, :]
                 example["state"] = state
@@ -177,6 +191,56 @@ class StarVLAPolicy(PreTrainedPolicy):
                 example["action"] = batch[ACTION][batch_idx].detach().to("cpu").numpy()
             examples.append(example)
         return examples
+
+    def _get_model_state(self, batch: dict[str, Any]) -> Tensor | None:
+        if not self.config.use_state_input or OBS_STATE not in batch:
+            return None
+        state = batch[OBS_STATE]
+        if state.ndim == 2:
+            state = state.unsqueeze(1)
+        state = state.clone()
+        available_index = self.config.state_available_index
+        if available_index is not None:
+            if available_index >= state.shape[-1]:
+                raise ValueError(
+                    f"state_available_index={available_index} is outside state_dim={state.shape[-1]}"
+                )
+            state[..., available_index] = 1.0
+
+        if self.training and (
+            self.config.state_full_dropout_prob > 0
+            or self.config.inter_arm_state_dropout_prob > 0
+        ):
+            if available_index is None:
+                raise ValueError("Structured state dropout requires state_available_index.")
+            draw = torch.rand(state.shape[0], device=state.device)
+            full_drop = draw < self.config.state_full_dropout_prob
+            inter_drop = (
+                (draw >= self.config.state_full_dropout_prob)
+                & (
+                    draw
+                    < self.config.state_full_dropout_prob
+                    + self.config.inter_arm_state_dropout_prob
+                )
+            )
+            if full_drop.any():
+                keep_indices = set(self.config.state_valid_indices)
+                keep_indices.add(available_index)
+                dropped = state[full_drop].clone()
+                for index in range(state.shape[-1]):
+                    if index not in keep_indices:
+                        dropped[..., index] = 0.0
+                dropped[..., available_index] = 0.0
+                state[full_drop] = dropped
+            if inter_drop.any():
+                start = self.config.inter_arm_state_start
+                end = start + 9
+                if end > state.shape[-1]:
+                    raise ValueError(
+                        f"Inter-arm dropout slice [{start}:{end}] exceeds state_dim={state.shape[-1]}"
+                    )
+                state[inter_drop, :, start:end] = 0.0
+        return state
 
     @staticmethod
     def _loss_from_starvla_output(output: Any) -> tuple[Tensor, dict[str, Any]]:
@@ -252,5 +316,19 @@ class StarVLAPolicy(PreTrainedPolicy):
     def reset(self):
         self._action_queue = deque(maxlen=self.config.n_action_steps)
 
-    def get_optim_params(self) -> dict:
-        return self.parameters()
+    def get_optim_params(self):
+        vlm_lr = self.config.vlm_optimizer_lr
+        if vlm_lr is None:
+            return self.parameters()
+        action_model = getattr(self.starvla_model, "action_model", None)
+        if action_model is None:
+            raise AttributeError("Differential StarVLA LR requires framework.action_model.")
+        action_params = [param for param in action_model.parameters() if param.requires_grad]
+        action_ids = {id(param) for param in action_params}
+        vlm_params = [
+            param for param in self.parameters() if param.requires_grad and id(param) not in action_ids
+        ]
+        return [
+            {"params": vlm_params, "lr": float(vlm_lr)},
+            {"params": action_params, "lr": float(self.config.optimizer_lr)},
+        ]

@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import shutil
 from pathlib import Path
 
 from huggingface_hub import save_torch_state_dict
@@ -62,6 +63,23 @@ def update_last_checkpoint(checkpoint_dir: Path) -> Path:
         last_checkpoint_dir.unlink()
     relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
     last_checkpoint_dir.symlink_to(relative_target)
+
+
+def prune_old_checkpoints(checkpoints_dir: Path, save_total_limit: int | None) -> list[Path]:
+    """Delete oldest numbered checkpoints after a newer checkpoint is fully saved."""
+    if save_total_limit is None:
+        return []
+    if save_total_limit < 1:
+        raise ValueError("save_total_limit must be at least 1 or None.")
+    numbered = sorted(
+        path
+        for path in checkpoints_dir.iterdir()
+        if path.is_dir() and not path.is_symlink() and path.name.isdigit()
+    )
+    removed = numbered[:-save_total_limit]
+    for path in removed:
+        shutil.rmtree(path)
+    return removed
 
 
 def save_checkpoint(

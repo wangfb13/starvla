@@ -196,6 +196,58 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
         state = batch[OBS_STATE].to(device=device, dtype=dtype)  # [B, state_dim]
         if state.dim() == 2:
             state = state.unsqueeze(1)  # [B, 1, state_dim]
+        fixed_mask_indices = list(dict.fromkeys(self.config.state_input_mask_indices))
+        if fixed_mask_indices:
+            if any(index >= state.shape[-1] for index in fixed_mask_indices):
+                raise ValueError(
+                    "state_input_mask_indices are outside the state dimension: "
+                    f"indices={fixed_mask_indices}, state_dim={state.shape[-1]}"
+                )
+            state = state.clone()
+            state[..., fixed_mask_indices] = 0.0
+        available_index = self.config.state_available_index
+        if available_index is not None:
+            if available_index >= state.shape[-1]:
+                raise ValueError(
+                    f"state_available_index={available_index} is outside state_dim={state.shape[-1]}"
+                )
+            state = state.clone()
+            # Set after normalization so availability has the unambiguous values 1/0.
+            state[..., available_index] = 1.0
+
+        if self.training and (
+            self.config.state_full_dropout_prob > 0
+            or self.config.inter_arm_state_dropout_prob > 0
+        ):
+            if available_index is None:
+                raise ValueError("Structured full-state dropout requires state_available_index.")
+            draw = torch.rand(state.shape[0], device=state.device)
+            full_drop = draw < self.config.state_full_dropout_prob
+            inter_drop = (
+                (draw >= self.config.state_full_dropout_prob)
+                & (
+                    draw
+                    < self.config.state_full_dropout_prob
+                    + self.config.inter_arm_state_dropout_prob
+                )
+            )
+            if full_drop.any():
+                keep_indices = set(self.config.state_valid_indices)
+                keep_indices.add(available_index)
+                dropped = state[full_drop].clone()
+                for index in range(state.shape[-1]):
+                    if index not in keep_indices:
+                        dropped[..., index] = 0.0
+                dropped[..., available_index] = 0.0
+                state[full_drop] = dropped
+            if inter_drop.any():
+                start = self.config.inter_arm_state_start
+                end = start + 9
+                if end > state.shape[-1]:
+                    raise ValueError(
+                        f"Inter-arm dropout slice [{start}:{end}] exceeds state_dim={state.shape[-1]}"
+                    )
+                state[inter_drop, :, start:end] = 0.0
         return state
 
     def _prepare_action_mask(self, batch: dict[str, Tensor], device, dtype) -> Tensor | None:

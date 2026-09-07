@@ -45,6 +45,7 @@ from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
     get_step_identifier,
     load_training_state,
+    prune_old_checkpoints,
     save_checkpoint,
     update_last_checkpoint,
 )
@@ -583,6 +584,14 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     policy_state_dict=policy_state_dict,
                 )
                 update_last_checkpoint(checkpoint_dir)
+                removed_checkpoints = prune_old_checkpoints(
+                    checkpoint_dir.parent, cfg.save_total_limit
+                )
+                if removed_checkpoints:
+                    logging.info(
+                        "Removed old checkpoints after successful save: %s",
+                        [path.name for path in removed_checkpoints],
+                    )
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
 

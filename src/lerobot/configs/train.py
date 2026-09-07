@@ -64,6 +64,8 @@ class TrainPipelineConfig(HubMixin):
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 20_000
+    # Maximum number of numbered checkpoint directories to retain. None keeps all.
+    save_total_limit: int | None = None
     use_policy_training_preset: bool = True
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None
@@ -83,6 +85,8 @@ class TrainPipelineConfig(HubMixin):
     checkpoint_path: Path | None = field(init=False, default=None)
 
     def validate(self) -> None:
+        if self.save_total_limit is not None and self.save_total_limit < 1:
+            raise ValueError("save_total_limit must be at least 1 or None.")
         # HACK: We parse again the cli args here to get the pretrained paths if there was some.
         policy_path = parser.get_path_arg("policy")
         if policy_path:

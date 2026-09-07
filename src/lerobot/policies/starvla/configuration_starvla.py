@@ -9,7 +9,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
-from lerobot.utils.constants import ACTION, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ACTION_MASK, OBS_STATE, OBS_STATE_MASK
 
 
 @PreTrainedConfig.register_subclass("starvla")
@@ -31,16 +31,38 @@ class StarVLAConfig(PreTrainedConfig):
     freeze_vlm: bool = False
 
     n_obs_steps: int = 1
+    state_history_horizon: int = 1
+    relative_state_history_to_current: bool = False
+    relative_scalar_state_history_indices: list[int] = field(default_factory=list)
+    inter_arm_relative_state: bool = False
+    inter_arm_state_start: int = 22
+    state_full_dropout_prob: float = 0.0
+    inter_arm_state_dropout_prob: float = 0.0
+    state_valid_indices: list[int] = field(default_factory=lambda: [20, 21])
+    state_available_index: int | None = None
     chunk_size: int = 16
     n_action_steps: int = 16
+    drop_n_last_frames: int = 0
     action_gap_frames: int = 6
+    action_gap_dataset_overrides: list[str] = field(default_factory=list)
+    apply_action_gap_to_real_datasets: bool = False
     action_execution_skip_start_steps: int = 0
 
     action_dim: int | None = None
     state_dim: int | None = None
     use_state_input: bool = True
+    use_relative_actions: bool = False
+    relative_action_keyframes: list[str] = field(default_factory=list)
+    relative_exclude_keys: list[str] = field(default_factory=list)
+    relative_exclude_joints: list[str] = field(default_factory=list)
+    action_feature_names: list[str] | None = None
+    state_feature_names: list[str] | None = None
+    action_mask_observation_key: str = OBS_ACTION_MASK
+    state_mask_observation_key: str = OBS_STATE_MASK
     image_keys: list[str] | None = None
     task_key: str = "task"
+    task_override: str | None = None
+    gradient_checkpointing: bool = False
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -51,6 +73,7 @@ class StarVLAConfig(PreTrainedConfig):
     )
 
     optimizer_lr: float = 2.5e-5
+    vlm_optimizer_lr: float | None = None
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
     optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 0.01
@@ -61,12 +84,37 @@ class StarVLAConfig(PreTrainedConfig):
     scheduler_decay_lr: float = 2.5e-6
 
     @property
-    def observation_delta_indices(self) -> list | None:
+    def observation_delta_indices(self) -> None:
+        return None
+
+    def get_observation_delta_indices(self, feature_key: str) -> list | None:
+        if feature_key == OBS_STATE and self.state_history_horizon > 1:
+            return list(range(1 - self.state_history_horizon, 1))
         return None
 
     @property
     def action_delta_indices(self) -> list:
         start = int(self.action_gap_frames)
+        return list(range(start, start + self.chunk_size))
+
+    @staticmethod
+    def parse_action_gap_dataset_override(spec: str) -> tuple[int, int]:
+        dataset_index, gap_frames = str(spec).split(":", maxsplit=1)
+        return int(dataset_index), int(gap_frames)
+
+    @property
+    def action_gap_frames_by_dataset_index(self) -> dict[int, int]:
+        return {
+            index: gap
+            for index, gap in map(
+                self.parse_action_gap_dataset_override, self.action_gap_dataset_overrides
+            )
+        }
+
+    def get_action_delta_indices(self, dataset_index: int | None = None) -> list:
+        start = int(self.action_gap_frames)
+        if dataset_index is not None:
+            start = self.action_gap_frames_by_dataset_index.get(int(dataset_index), start)
         return list(range(start, start + self.chunk_size))
 
     @property
@@ -76,6 +124,20 @@ class StarVLAConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if self.action_gap_frames < 0:
             raise ValueError("action_gap_frames must be non-negative.")
+        if self.chunk_size < 1 or not 1 <= self.n_action_steps <= self.chunk_size:
+            raise ValueError("Require chunk_size >= n_action_steps >= 1.")
+        if not 0 <= self.action_execution_skip_start_steps < self.n_action_steps:
+            raise ValueError("action_execution_skip_start_steps must be in [0, n_action_steps).")
+        if self.state_history_horizon < 1:
+            raise ValueError("state_history_horizon must be at least 1.")
+        if self.relative_state_history_to_current and self.state_history_horizon < 2:
+            raise ValueError("Current-relative state history requires at least two state frames.")
+        if self.state_full_dropout_prob < 0 or self.inter_arm_state_dropout_prob < 0:
+            raise ValueError("State dropout probabilities must be non-negative.")
+        if self.state_full_dropout_prob + self.inter_arm_state_dropout_prob > 1:
+            raise ValueError("State dropout probabilities must sum to at most 1.")
+        if self.use_state_input and (self.state_dim is None or self.state_dim < 1):
+            raise ValueError("State-conditioned StarVLA requires policy.state_dim >= 1.")
 
         if self.input_features is None:
             self.input_features = {}
@@ -115,6 +177,10 @@ class StarVLAConfig(PreTrainedConfig):
             grad_clip_norm=self.optimizer_grad_clip_norm,
         )
 
+    @property
+    def requires_state_feature(self) -> bool:
+        return bool(self.use_state_input or self.use_relative_actions)
+
     def get_scheduler_preset(self) -> CosineDecayWithWarmupSchedulerConfig:
         return CosineDecayWithWarmupSchedulerConfig(
             peak_lr=self.optimizer_lr,
@@ -152,7 +218,7 @@ class StarVLAConfig(PreTrainedConfig):
 
         action_model = dict(framework.get("action_model", {}))
         action_model.setdefault("action_dim", int(self.action_dim or 0))
-        action_model.setdefault("state_dim", int(self.state_dim or 0))
+        action_model.setdefault("state_dim", int(self.state_dim or 0) if self.use_state_input else 0)
         action_model.setdefault("action_horizon", int(self.chunk_size))
         framework["action_model"] = action_model
 

@@ -1,0 +1,38 @@
+{
+  "features": {
+    "observation.images.cam_left_undist": {
+      "dtype": "video",
+      "shape": [
+        3,
+        224,
+        224
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "intrinsics": {
+        "model": "none",
+        "params": []
+      }
+    },
+    "observation.images.cam_right_undist": {
+      "dtype": "video",
+      "shape": [
+        3,
+        224,
+        224
+      ],
+      "names": [
+        "channels",
+        "height",
+        "width"
+      ],
+      "intrinsics": {
+        "model": "none",
+        "params": []
+      }
+    }
+  }
+}

@@ -71,6 +71,8 @@ def make_starvla_groot_pre_post_processors(
         relative_scalar_state_history_indices=getattr(
             config, "relative_scalar_state_history_indices", []
         ),
+        inter_arm_relative_state=getattr(config, "inter_arm_relative_state", False),
+        inter_arm_state_start=getattr(config, "inter_arm_state_start", 22),
         online_anchor_state_to_episode_start=getattr(
             config, "online_anchor_state_to_episode_start", False
         ),

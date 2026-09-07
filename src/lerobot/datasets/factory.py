@@ -378,6 +378,10 @@ def _load_sidecar_stats_for_dataset(cfg: TrainPipelineConfig, dataset) -> dict |
                 relative_scalar_state_history_indices=list(
                     getattr(cfg.policy, "relative_scalar_state_history_indices", [])
                 ),
+                inter_arm_relative_state=bool(
+                    getattr(cfg.policy, "inter_arm_relative_state", False)
+                ),
+                inter_arm_state_start=int(getattr(cfg.policy, "inter_arm_state_start", 22)),
             )
         else:
             state_stats = sidecar.masked_vector_stats("observation.state", "state_mask", state_names)

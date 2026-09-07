@@ -52,6 +52,18 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     # Scalar state dimensions represented as [history-current, current absolute].
     # For canonical bimanual UMI state, grippers are indices 9 and 19.
     relative_scalar_state_history_indices: list[int] = field(default_factory=list)
+    # Append/recompute a 9D left-TCP pose in the current right-TCP frame.
+    inter_arm_relative_state: bool = False
+    inter_arm_state_start: int = 22
+    # Mutually exclusive structured state dropout probabilities. The first drops
+    # continuous self+inter-arm state, the second drops only the inter-arm block.
+    state_full_dropout_prob: float = 0.0
+    inter_arm_state_dropout_prob: float = 0.0
+    # State dimensions that are always replaced by zero after normalization.
+    # This is applied identically during training and online inference.
+    state_input_mask_indices: list[int] = field(default_factory=list)
+    state_valid_indices: list[int] = field(default_factory=lambda: [20, 21])
+    state_available_index: int | None = None
     # Exclude episode-tail samples that cannot provide a complete action chunk.
     # The offline trainer forwards this value to EpisodeAwareSampler.
     drop_n_last_frames: int = 0
@@ -196,6 +208,20 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
             )
         if any(index < 0 for index in self.relative_scalar_state_history_indices):
             raise ValueError("relative_scalar_state_history_indices must be non-negative.")
+        if self.inter_arm_state_start < 0:
+            raise ValueError("inter_arm_state_start must be non-negative.")
+        if not 0.0 <= self.state_full_dropout_prob <= 1.0:
+            raise ValueError("state_full_dropout_prob must be in [0, 1].")
+        if not 0.0 <= self.inter_arm_state_dropout_prob <= 1.0:
+            raise ValueError("inter_arm_state_dropout_prob must be in [0, 1].")
+        if self.state_full_dropout_prob + self.inter_arm_state_dropout_prob > 1.0:
+            raise ValueError("Structured state dropout probabilities must sum to at most 1.")
+        if any(index < 0 for index in self.state_input_mask_indices):
+            raise ValueError("state_input_mask_indices must contain only non-negative indices.")
+        if any(index < 0 for index in self.state_valid_indices):
+            raise ValueError("state_valid_indices must be non-negative.")
+        if self.state_available_index is not None and self.state_available_index < 0:
+            raise ValueError("state_available_index must be non-negative or None.")
         if self.action_execution_skip_start_steps < 0:
             raise ValueError("action_execution_skip_start_steps must be non-negative.")
         if self.action_execution_skip_start_steps >= self.n_action_steps:

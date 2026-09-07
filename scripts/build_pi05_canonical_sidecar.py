@@ -69,6 +69,13 @@ REAL_ROBOT_TYPES = {"spark3_pose_gripper"}
 UMI_ROBOT_TYPES = {"ugripper_left", "ugripper_right", "dual_ugripper", "dual_ugripper_v2_5"}
 UMI_GRIPPER_RAW_MAX = 0.0
 DEFAULT_UMI_GRIPPER_OPEN_ABS = 0.436
+INTER_ARM_RELATIVE_STATE_NAMES = [
+    "left_wrt_right_x",
+    "left_wrt_right_y",
+    "left_wrt_right_z",
+    *[f"left_wrt_right_rot6d_{idx}" for idx in range(6)],
+]
+STATE_AVAILABLE_NAME = "state_available"
 
 
 def parse_args() -> argparse.Namespace:
@@ -191,6 +198,15 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Overwrite existing sidecar/stat/summary files.",
+    )
+    parser.add_argument(
+        "--add-inter-arm-relative-state",
+        action="store_true",
+        help=(
+            "Append the 9D left-TCP pose in the right-TCP frame plus a state_available bit. "
+            "The resulting state is 32D; the online/history processor may recompute the 9D block "
+            "against the current right TCP for exact UMI history semantics."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -402,6 +418,28 @@ def build_pose_absolute_rot6d(
     return output, valid
 
 
+def build_left_pose_in_right_frame(
+    left_pose_values: np.ndarray,
+    left_pose_valid: np.ndarray,
+    right_pose_values: np.ndarray,
+    right_pose_valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the left TCP pose in the simultaneous right TCP frame."""
+    row_count = left_pose_values.shape[0]
+    output = np.zeros((row_count, 9), dtype=np.float32)
+    valid = np.zeros((row_count, 9), dtype=bool)
+    pose_present = left_pose_valid.all(axis=1) & right_pose_valid.all(axis=1)
+    for row_idx in np.flatnonzero(pose_present):
+        left_rot = quat_to_matrix(left_pose_values[row_idx, 3:7])
+        right_rot = quat_to_matrix(right_pose_values[row_idx, 3:7])
+        output[row_idx, :3] = right_rot.T @ (
+            left_pose_values[row_idx, :3] - right_pose_values[row_idx, :3]
+        )
+        output[row_idx, 3:9] = matrix_to_rot6d(right_rot.T @ left_rot)
+        valid[row_idx, :] = True
+    return output, valid
+
+
 def collect_episode_anchor_poses(
     episode_ids: np.ndarray,
     pose_values: np.ndarray,
@@ -487,6 +525,7 @@ def build_state_action_from_raw(
     umi_gripper_open_abs: float,
     missing_value: float,
     real_mask_arm: str = "none",
+    add_inter_arm_relative_state: bool = False,
 ) -> dict[str, np.ndarray]:
     source_state_names = list(info["features"][OBS_STATE]["names"])
     source_action_names = list(info["features"][ACTION]["names"])
@@ -504,6 +543,8 @@ def build_state_action_from_raw(
     action_masks: list[np.ndarray] = []
     arm_anchor_counts: dict[str, int] = {}
     gripper_open_abs_by_arm: dict[str, float] = {}
+    raw_state_pose_by_arm: dict[str, np.ndarray] = {}
+    raw_state_pose_valid_by_arm: dict[str, np.ndarray] = {}
 
     for arm in ARM_NAMES:
         pose_state, pose_state_valid = take_columns_with_aliases(
@@ -518,6 +559,8 @@ def build_state_action_from_raw(
             GRIPPER_NAME_CANDIDATES[arm],
             missing_value=missing_value,
         )
+        raw_state_pose_by_arm[arm] = pose_state
+        raw_state_pose_valid_by_arm[arm] = pose_state_valid
         pose_action, pose_action_valid = take_columns_with_aliases(
             action_matrix,
             action_index,
@@ -614,7 +657,27 @@ def build_state_action_from_raw(
         action_masks.append(action_mask)
 
     canonical_state = np.concatenate(state_arms + state_present_bits, axis=1).astype(np.float32)
-    state_mask = np.concatenate(state_masks, axis=1).astype(np.float32)
+    # The two arm-valid bits are metadata and are always observable.
+    state_mask = np.concatenate(
+        state_masks + [np.ones((canonical_state.shape[0], 2), dtype=np.float32)], axis=1
+    ).astype(np.float32)
+    state_feature_names = canonical_state_feature_names()
+    if add_inter_arm_relative_state:
+        inter_arm_pose, inter_arm_valid = build_left_pose_in_right_frame(
+            raw_state_pose_by_arm["left"],
+            raw_state_pose_valid_by_arm["left"],
+            raw_state_pose_by_arm["right"],
+            raw_state_pose_valid_by_arm["right"],
+        )
+        canonical_state = np.concatenate(
+            [canonical_state, inter_arm_pose, np.ones((canonical_state.shape[0], 1), dtype=np.float32)],
+            axis=1,
+        ).astype(np.float32)
+        state_mask = np.concatenate(
+            [state_mask, inter_arm_valid.astype(np.float32), np.ones((state_mask.shape[0], 1), dtype=np.float32)],
+            axis=1,
+        ).astype(np.float32)
+        state_feature_names = state_feature_names + INTER_ARM_RELATIVE_STATE_NAMES + [STATE_AVAILABLE_NAME]
     canonical_action = np.concatenate(action_arms, axis=1).astype(np.float32)
     action_valid_mask = np.concatenate(action_masks, axis=1).astype(np.float32)
     prev_action, prev_action_valid_mask = build_previous_action(
@@ -647,6 +710,7 @@ def build_state_action_from_raw(
         "right_present": arm_present_mask[:, 1],
         "arm_anchor_counts": arm_anchor_counts,
         "gripper_open_abs_by_arm": gripper_open_abs_by_arm,
+        "state_feature_names": state_feature_names,
     }
 
 
@@ -821,17 +885,11 @@ def default_dim_stats(name: str) -> dict[str, float]:
 
 def compute_framewise_stats(canonical: dict[str, np.ndarray], base_stats: dict[str, Any] | None) -> dict[str, Any]:
     stats = deepcopy(base_stats) if isinstance(base_stats, dict) else {}
-    state_valid_mask = np.concatenate(
-        [
-            canonical["state_mask"],
-            np.ones((canonical[OBS_STATE].shape[0], 2), dtype=np.float32),
-        ],
-        axis=1,
-    )
+    state_valid_mask = canonical["state_mask"]
     stats[OBS_STATE] = compute_masked_stats(
         canonical[OBS_STATE],
         state_valid_mask,
-        canonical_state_feature_names(),
+        canonical["state_feature_names"],
     )
     stats[ACTION] = compute_masked_stats(
         canonical[ACTION],
@@ -1043,6 +1101,7 @@ def build_sidecar_for_dataset(
     relative_action_keyframes: str,
     relative_exclude_joints: str,
     overwrite: bool,
+    add_inter_arm_relative_state: bool,
 ) -> dict[str, Any]:
     info_path = dataset_root / "meta" / "info.json"
     stats_path = dataset_root / "meta" / "stats.json"
@@ -1080,6 +1139,7 @@ def build_sidecar_for_dataset(
         umi_gripper_open_abs=umi_gripper_open_abs,
         missing_value=missing_value,
         real_mask_arm=real_mask_arm,
+        add_inter_arm_relative_state=add_inter_arm_relative_state,
     )
 
     task_text = resolve_task_text(dataset_root)
@@ -1137,13 +1197,7 @@ def build_sidecar_for_dataset(
     write_json(stats_output_path, serialize_dict(stats_to_write))
 
     action_valid_ratio = canonical["action_valid_mask"].mean(axis=0)
-    state_valid_ratio = np.concatenate(
-        [
-            canonical["state_mask"],
-            np.ones((canonical[OBS_STATE].shape[0], 2), dtype=np.float32),
-        ],
-        axis=1,
-    ).mean(axis=0)
+    state_valid_ratio = canonical["state_mask"].mean(axis=0)
     summary = {
         "dataset_root": str(dataset_root),
         "dataset_type": dataset_type,
@@ -1156,9 +1210,9 @@ def build_sidecar_for_dataset(
         "relative_stats_path": str(relative_stats_path) if relative_stats_path is not None else None,
         "base_sidecar": str(base_sidecar) if base_sidecar is not None else None,
         "row_count": int(len(framewise_df)),
-        "canonical_state_dim": CANONICAL_STATE_DIM,
+        "canonical_state_dim": int(canonical[OBS_STATE].shape[1]),
         "canonical_action_dim": CANONICAL_ACTION_DIM,
-        "canonical_state_names": canonical_state_feature_names(),
+        "canonical_state_names": canonical["state_feature_names"],
         "canonical_action_names": canonical_action_feature_names(),
         "state_pose_mode": (
             "episode_anchor_relative_rot6d"
@@ -1206,7 +1260,7 @@ def build_sidecar_for_dataset(
             "use_state_input": True,
             "action_valid_mask_key": "action_valid_mask",
             "state_present_key": "state_present",
-            "max_state_dim": CANONICAL_STATE_DIM,
+            "max_state_dim": int(canonical[OBS_STATE].shape[1]),
             "max_action_dim": CANONICAL_ACTION_DIM,
         },
     }
@@ -1255,6 +1309,7 @@ def main() -> None:
                 relative_action_keyframes=args.relative_action_keyframes,
                 relative_exclude_joints=args.relative_exclude_joints,
                 overwrite=args.overwrite,
+                add_inter_arm_relative_state=args.add_inter_arm_relative_state,
             )
         )
 
