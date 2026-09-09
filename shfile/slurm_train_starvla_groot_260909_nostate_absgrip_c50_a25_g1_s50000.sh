@@ -21,8 +21,8 @@ INFO_PATH=${REPO}/shfile/info_umi_260812_stack_cups_undist_wrist.json
 BASE_VLM=/public/home/eng_ywang/wangfubo/pretrained_models/Qwen3.5-0.8B
 
 GPU_COUNT=1
-MICRO_BATCH_SIZE=2
-GRAD_ACCUM_STEPS=12
+MICRO_BATCH_SIZE=4
+GRAD_ACCUM_STEPS=6
 MAX_STEPS=50000
 SAVE_FREQ=10000
 JOB_NAME=starvla_groot_260909_nostate_absgrip_c50_a25_g6_s50000
