@@ -113,6 +113,9 @@ class StarvlaGrootConfig(SensorRoutingMixin, PreTrainedConfig):
     # use_state_input switch; relative/canonical processors may still use state even
     # when the action head does not.
     use_state_input: bool = True
+    # Optional fixed language instruction for single-task datasets whose task
+    # metadata is missing or contains a placeholder such as "Unknown task".
+    task_override: str | None = None
 
     # === Multi-view / tactile / state routing ===
     # wrist_only / top_camera_keys / wrist_camera_keys / tactile_mode /

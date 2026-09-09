@@ -181,6 +181,8 @@ class StarvlaGrootPolicy(PreTrainedPolicy):
         return torch.stack(views, dim=1)
 
     def _get_instructions(self, batch: dict[str, Tensor], bsize: int) -> list[str]:
+        if self.config.task_override:
+            return [str(self.config.task_override)] * bsize
         tasks = batch.get("task")
         if tasks is None:
             return [""] * bsize
