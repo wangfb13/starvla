@@ -1,0 +1,3 @@
+/public/home/eng_ywang/wangfubo/umi_data/260902_stack_three_cup_1_tr224
+/public/home/eng_ywang/wangfubo/umi_data/260902_stack_three_cup_2_tr224
+/public/home/eng_ywang/wangfubo/umi_data/260909_umi_stack_cups_bucai_pz5_trainready_224_small_tag

@@ -213,6 +213,44 @@ def test_state_history_and_action_share_current_tcp_anchor():
     torch.testing.assert_close(step._last_state, current.unsqueeze(0))
 
 
+def test_single_frame_state_history_uses_current_tcp_as_action_anchor():
+    """A retained [B, 1, D] state anchors actions even when state is not model input."""
+    identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    current = torch.zeros(2, 32)
+    current[:, 0:3] = torch.tensor([[1.0, 2.0, 3.0], [-1.0, 0.5, 2.0]])
+    current[:, 3:9] = identity_rot6d
+    current[:, 10:13] = torch.tensor([[-1.0, -2.0, 0.5], [0.2, 0.3, 0.4]])
+    current[:, 13:19] = identity_rot6d
+    history = current.unsqueeze(1)
+
+    action = current[:, None, :20].repeat(1, 2, 1)
+    action[:, 0, 0] += 0.2
+    action[:, 1, 10] -= 0.3
+    action[:, :, 9] = torch.tensor([[0.25, 0.5], [0.75, 1.0]])
+    action[:, :, 19] = torch.tensor([[1.0, 0.75], [0.5, 0.25]])
+
+    step = RelativeActionsProcessorStep(
+        enabled=True,
+        exclude_joints=["gripper"],
+        action_names=[
+            *[f"left_{idx}" for idx in range(9)],
+            "left_gripper",
+            *[f"right_{idx}" for idx in range(9)],
+            "right_gripper",
+        ],
+        relative_action_keyframes=["0:3", "10:13"],
+        relative_state_history_to_current=False,
+    )
+    result = step(batch_to_transition({ACTION: action, OBS_STATE: history}))
+    relative_action = result[TransitionKey.ACTION]
+
+    torch.testing.assert_close(relative_action[:, 0, 0], torch.full((2,), 0.2))
+    torch.testing.assert_close(relative_action[:, 1, 10], torch.full((2,), -0.3))
+    torch.testing.assert_close(relative_action[:, :, 9], action[:, :, 9])
+    torch.testing.assert_close(relative_action[:, :, 19], action[:, :, 19])
+    torch.testing.assert_close(step._last_state, current)
+
+
 def test_online_episode_anchor_state_keeps_raw_state_for_action_decode():
     identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
     z90_rot6d = torch.tensor([0.0, 1.0, 0.0, -1.0, 0.0, 0.0])

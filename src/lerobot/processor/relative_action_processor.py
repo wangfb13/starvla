@@ -474,12 +474,20 @@ class RelativeActionsProcessorStep(ProcessorStep):
         state = observation.get(OBS_STATE) if observation else None
         action = transition.get(TransitionKey.ACTION)
 
-        if self.relative_state_history_to_current and state is not None:
-            if state.ndim != 3 or state.shape[-2] < 2:
-                raise ValueError(
-                    "relative_state_history_to_current expects state [B,H,D] with H>=2, "
-                    f"got {tuple(state.shape)}"
-                )
+        if self.relative_state_history_to_current and (
+            state is None or state.ndim != 3 or state.shape[-2] < 2
+        ):
+            state_shape = None if state is None else tuple(state.shape)
+            raise ValueError(
+                "relative_state_history_to_current expects state [B,H,D] with H>=2, "
+                f"got {state_shape}"
+            )
+
+        # Dataset sampling may retain a history axis even when observation.state is
+        # not fed to the policy (for example, no-state training with H=1).  The
+        # action anchor must nevertheless be the latest/current TCP, so selecting
+        # it is independent of relative_state_history_to_current.
+        if state is not None and state.ndim == 3:
             current_state = state[:, -1, :]
         else:
             current_state = state
