@@ -50,6 +50,7 @@ class StarVLAConfig(PreTrainedConfig):
 
     action_dim: int | None = None
     state_dim: int | None = None
+    qpos_state_dim: int | None = None
     use_state_input: bool = True
     use_relative_actions: bool = False
     relative_action_keyframes: list[str] = field(default_factory=list)
@@ -57,6 +58,14 @@ class StarVLAConfig(PreTrainedConfig):
     relative_exclude_joints: list[str] = field(default_factory=list)
     action_feature_names: list[str] | None = None
     state_feature_names: list[str] | None = None
+    use_tactile: bool = False
+    tactile_history_len: int = 30
+    tactile_channels: int = 4
+    tactile_latent_dim: int = 128
+    tactile_history_key: str = "observation.tactile_history"
+    # Four sensors, each specified as [Fx, Fy, Fz] indices in observation.state:
+    # left-left, left-right, right-left, right-right.
+    tactile_force_indices: list[int] = field(default_factory=list)
     action_mask_observation_key: str = OBS_ACTION_MASK
     state_mask_observation_key: str = OBS_STATE_MASK
     image_keys: list[str] | None = None
@@ -88,8 +97,15 @@ class StarVLAConfig(PreTrainedConfig):
         return None
 
     def get_observation_delta_indices(self, feature_key: str) -> list | None:
-        if feature_key == OBS_STATE and self.state_history_horizon > 1:
-            return list(range(1 - self.state_history_horizon, 1))
+        history_len = self.state_history_horizon
+        if self.use_tactile:
+            if not self.use_state_input:
+                raise ValueError("use_tactile=True requires use_state_input=True for qpos/state input.")
+            history_len = max(history_len, self.tactile_history_len)
+        if feature_key == OBS_STATE and history_len > 1:
+            # Strictly causal: the newest sample is t (delta 0); no positive
+            # delta, and therefore no future tactile frame, is requested.
+            return list(range(1 - history_len, 1))
         return None
 
     @property
@@ -130,6 +146,24 @@ class StarVLAConfig(PreTrainedConfig):
             raise ValueError("action_execution_skip_start_steps must be in [0, n_action_steps).")
         if self.state_history_horizon < 1:
             raise ValueError("state_history_horizon must be at least 1.")
+        if self.use_tactile:
+            if self.framework_name not in {"QwenPI", "QwenFM"}:
+                raise ValueError("Tactile history conditioning is currently implemented for QwenPI/QwenFM.")
+            if self.tactile_history_len < 1:
+                raise ValueError("tactile_history_len must be at least 1.")
+            if self.tactile_channels != 4:
+                raise ValueError("The current four-sensor force aggregation produces exactly 4 channels.")
+            if self.tactile_latent_dim < 1:
+                raise ValueError("tactile_latent_dim must be at least 1.")
+            if len(self.tactile_force_indices) != 12:
+                raise ValueError(
+                    "use_tactile=True requires 12 tactile_force_indices ordered as "
+                    "four [Fx, Fy, Fz] sensor triples."
+                )
+            if min(self.tactile_force_indices) < 0:
+                raise ValueError("tactile_force_indices must be non-negative.")
+            if self.state_dim is not None and max(self.tactile_force_indices) >= self.state_dim:
+                raise ValueError("tactile_force_indices contains an index outside policy.state_dim.")
         if self.relative_state_history_to_current and self.state_history_horizon < 2:
             raise ValueError("Current-relative state history requires at least two state frames.")
         if self.state_full_dropout_prob < 0 or self.inter_arm_state_dropout_prob < 0:
@@ -138,6 +172,11 @@ class StarVLAConfig(PreTrainedConfig):
             raise ValueError("State dropout probabilities must sum to at most 1.")
         if self.use_state_input and (self.state_dim is None or self.state_dim < 1):
             raise ValueError("State-conditioned StarVLA requires policy.state_dim >= 1.")
+        if self.qpos_state_dim is not None:
+            if self.qpos_state_dim < 1:
+                raise ValueError("qpos_state_dim must be at least 1 when specified.")
+            if self.state_dim is not None and self.qpos_state_dim > self.state_dim:
+                raise ValueError("qpos_state_dim cannot exceed state_dim.")
 
         if self.input_features is None:
             self.input_features = {}
@@ -179,7 +218,7 @@ class StarVLAConfig(PreTrainedConfig):
 
     @property
     def requires_state_feature(self) -> bool:
-        return bool(self.use_state_input or self.use_relative_actions)
+        return bool(self.use_state_input or self.use_relative_actions or self.use_tactile)
 
     def get_scheduler_preset(self) -> CosineDecayWithWarmupSchedulerConfig:
         return CosineDecayWithWarmupSchedulerConfig(
@@ -216,9 +255,17 @@ class StarVLAConfig(PreTrainedConfig):
             qwenvl.setdefault("attn_implementation", self.attn_implementation)
             framework["qwenvl"] = qwenvl
 
+        framework["use_tactile"] = bool(self.use_tactile)
+        framework["tactile_history_len"] = int(self.tactile_history_len)
+        framework["tactile_channels"] = int(self.tactile_channels)
+        framework["tactile_latent_dim"] = int(self.tactile_latent_dim)
+
         action_model = dict(framework.get("action_model", {}))
         action_model.setdefault("action_dim", int(self.action_dim or 0))
-        action_model.setdefault("state_dim", int(self.state_dim or 0) if self.use_state_input else 0)
+        action_model.setdefault(
+            "state_dim",
+            int(self.qpos_state_dim or self.state_dim or 0) if self.use_state_input else 0,
+        )
         action_model.setdefault("action_horizon", int(self.chunk_size))
         framework["action_model"] = action_model
 

@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+from torch import nn
 from PIL import Image
 
 from deployment.model_server.tools.image_tools import to_pil_preserve
@@ -51,6 +52,13 @@ class QwenPIDefaultConfig:
     # --- Registry identifier (must match @FRAMEWORK_REGISTRY.register) ---
     name: str = "QwenPI"
 
+    # Optional one-second physical tactile history branch. Disabled by
+    # default so old QwenPI configs/checkpoints retain their original graph.
+    use_tactile: bool = False
+    tactile_history_len: int = 30
+    tactile_channels: int = 4
+    tactile_latent_dim: int = 128
+
     # === VLM backbone (Qwen2.5-VL / Qwen3-VL) ===
     qwenvl: dict = field(
         default_factory=lambda: {
@@ -64,7 +72,6 @@ class QwenPIDefaultConfig:
             "num_vl_layers": 36,
         }
     )
-
     # === Action head (Layer-wise Flow-matching / cross-DiT) ===
     action_model: dict = field(
         default_factory=lambda: {
@@ -102,6 +109,32 @@ class QwenPIDefaultConfig:
             },
         }
     )
+
+
+class TactileEncoder(nn.Module):
+    """Minimal MLP encoder for a fixed-length causal tactile window."""
+
+    def __init__(self, history_len: int, channels: int, latent_dim: int = 128):
+        super().__init__()
+        self.history_len = int(history_len)
+        self.channels = int(channels)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.history_len * self.channels, latent_dim),
+            nn.GELU(),
+            nn.Linear(latent_dim, latent_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, tactile_history: torch.Tensor) -> torch.Tensor:
+        if tactile_history.ndim != 3 or tuple(tactile_history.shape[1:]) != (
+            self.history_len,
+            self.channels,
+        ):
+            raise ValueError(
+                f"Expected tactile [B,{self.history_len},{self.channels}], "
+                f"got {tuple(tactile_history.shape)}"
+            )
+        return self.mlp(tactile_history.reshape(tactile_history.shape[0], -1))
 
 
 @FRAMEWORK_REGISTRY.register("QwenFM")
@@ -158,6 +191,17 @@ class Qwen_PI(baseframework):
 
         self.action_model: LayerwiseFlowmatchingActionHead = get_action_model(config=self.config)
 
+        self.use_tactile = bool(self.config.framework.use_tactile)
+        if self.use_tactile:
+            self.tactile_encoder = TactileEncoder(
+                history_len=int(self.config.framework.tactile_history_len),
+                channels=int(self.config.framework.tactile_channels),
+                latent_dim=int(self.config.framework.tactile_latent_dim),
+            )
+            self.tactile_proj = nn.Linear(
+                int(self.config.framework.tactile_latent_dim), llm_hidden_size
+            )
+
         # `action_horizon` is the single source of truth for chunk length.
         # Legacy aliases (`future_action_window_size`, `past_action_window_size`)
         # are normalised upstream by `share_tools.apply_config_compat`, so we
@@ -183,6 +227,39 @@ class Qwen_PI(baseframework):
             vl_embs_list = list(qwenvl_outputs.hidden_states[-expected_layers:])
         return vl_embs_list, attention_mask
 
+    def _append_tactile_condition(
+        self,
+        vl_embs_list: list[torch.Tensor],
+        attention_mask: torch.Tensor | None,
+        examples: List[dict],
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None]:
+        """Append the same tactile token to every layer-wise VLM condition."""
+        if not self.use_tactile:
+            return vl_embs_list, attention_mask
+        if any("tactile_history" not in example for example in examples):
+            raise ValueError("use_tactile=True requires tactile_history in every example.")
+
+        base_hidden = vl_embs_list[-1]
+        tactile_history = torch.as_tensor(
+            np.asarray([example["tactile_history"] for example in examples]),
+            device=base_hidden.device,
+            dtype=self.tactile_encoder.mlp[0].weight.dtype,
+        )
+        z_tactile = self.tactile_encoder(tactile_history)  # [B,128]
+        tactile_token = self.tactile_proj(z_tactile).to(dtype=base_hidden.dtype).unsqueeze(1)
+        conditioned = [torch.cat((hidden, tactile_token), dim=1) for hidden in vl_embs_list]
+
+        batch_size, vl_tokens = base_hidden.shape[:2]
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                (batch_size, vl_tokens), device=base_hidden.device, dtype=torch.bool
+            )
+        tactile_mask = torch.ones(
+            (batch_size, 1), device=attention_mask.device, dtype=attention_mask.dtype
+        )
+        attention_mask = torch.cat((attention_mask, tactile_mask), dim=1)
+        return conditioned, attention_mask
+
     def forward(
         self,
         examples: List[dict] = None,
@@ -206,6 +283,9 @@ class Qwen_PI(baseframework):
 
         # Step 1: encode through QwenVL
         vl_embs_list, backbone_attention_mask = self._encode_vl_hidden_states(batch_images, instructions)
+        vl_embs_list, backbone_attention_mask = self._append_tactile_condition(
+            vl_embs_list, backbone_attention_mask, examples
+        )
         base_hidden = vl_embs_list[-1]
 
         # Step 4: Action Expert Forward and Loss
@@ -276,6 +356,9 @@ class Qwen_PI(baseframework):
 
         # Step 1: encode through QwenVL
         vl_embs_list, backbone_attention_mask = self._encode_vl_hidden_states(batch_images, instructions)
+        vl_embs_list, backbone_attention_mask = self._append_tactile_condition(
+            vl_embs_list, backbone_attention_mask, examples
+        )
         base_hidden = vl_embs_list[-1]
         if backbone_attention_mask is not None:
             backbone_attention_mask = backbone_attention_mask.to(dtype=torch.bool)
@@ -336,7 +419,10 @@ class Qwen_PI(baseframework):
         if train_obs_image_size:
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
 
-        vl_embs_list, _ = self._encode_vl_hidden_states(batch_images, instructions)
+        vl_embs_list, backbone_attention_mask = self._encode_vl_hidden_states(batch_images, instructions)
+        vl_embs_list, _ = self._append_tactile_condition(
+            vl_embs_list, backbone_attention_mask, examples
+        )
         base_hidden = vl_embs_list[-1]
 
         state_t = (

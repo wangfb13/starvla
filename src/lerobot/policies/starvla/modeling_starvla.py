@@ -168,6 +168,7 @@ class StarVLAPolicy(PreTrainedPolicy):
         bsize = self._batch_size(batch)
         tasks = self._get_tasks(batch, bsize)
         model_state = self._get_model_state(batch)
+        tactile_history = self._get_tactile_history(batch)
 
         examples: list[dict[str, Any]] = []
         for batch_idx in range(bsize):
@@ -185,6 +186,10 @@ class StarVLAPolicy(PreTrainedPolicy):
                 if state.ndim == 1:
                     state = state[None, :]
                 example["state"] = state
+            if tactile_history is not None:
+                example["tactile_history"] = (
+                    tactile_history[batch_idx].detach().to("cpu").numpy()
+                )
             if include_actions:
                 if ACTION not in batch:
                     raise ValueError("StarVLA training forward requires 'action' in the batch.")
@@ -198,7 +203,11 @@ class StarVLAPolicy(PreTrainedPolicy):
         state = batch[OBS_STATE]
         if state.ndim == 2:
             state = state.unsqueeze(1)
-        state = state.clone()
+        # Tactile training may make the dataset fetch a longer state history;
+        # keep the original qpos/state conditioning horizon unchanged.
+        state = state[:, -self.config.state_history_horizon :, :].clone()
+        if self.config.qpos_state_dim is not None:
+            state = state[..., : self.config.qpos_state_dim]
         available_index = self.config.state_available_index
         if available_index is not None:
             if available_index >= state.shape[-1]:
@@ -241,6 +250,56 @@ class StarVLAPolicy(PreTrainedPolicy):
                     )
                 state[inter_drop, :, start:end] = 0.0
         return state
+
+    def _update_online_tactile_history(self, tactile: Tensor) -> Tensor:
+        if tactile.ndim == 3:
+            if tactile.shape[1] != 1:
+                raise ValueError(
+                    "Online tactile updates must contain one current frame, "
+                    f"got {tuple(tactile.shape)}"
+                )
+            tactile = tactile[:, 0]
+        if tactile.ndim != 2 or tactile.shape[-1] != self.config.tactile_channels:
+            raise ValueError(
+                f"Expected current tactile [B,{self.config.tactile_channels}], "
+                f"got {tuple(tactile.shape)}"
+            )
+
+        if self._tactile_history and self._tactile_history[0].shape != tactile.shape:
+            self._tactile_history.clear()
+        self._tactile_history.append(tactile.detach().clone())
+        history = list(self._tactile_history)
+        missing = self.config.tactile_history_len - len(history)
+        if missing > 0:
+            history = [torch.zeros_like(tactile) for _ in range(missing)] + history
+        return torch.stack(history, dim=1)
+
+    def _get_tactile_history(self, batch: dict[str, Any]) -> Tensor | None:
+        if not self.config.use_tactile:
+            return None
+        key = self.config.tactile_history_key
+        if key not in batch:
+            raise ValueError(f"use_tactile=True requires batch key {key!r}.")
+        tactile = batch[key]
+        if tactile.ndim == 2:
+            tactile = tactile.unsqueeze(1)
+        expected = (
+            self.config.tactile_history_len,
+            self.config.tactile_channels,
+        )
+        if tactile.ndim != 3 or tuple(tactile.shape[1:]) not in {
+            expected,
+            (1, self.config.tactile_channels),
+        }:
+            raise ValueError(
+                f"Expected tactile [B,{expected[0]},{expected[1]}] (or one online frame), "
+                f"got {tuple(tactile.shape)}"
+            )
+        if tactile.shape[1] == self.config.tactile_history_len:
+            return tactile
+        if self.training:
+            raise ValueError("Training tactile history must already have the full causal window.")
+        return self._update_online_tactile_history(tactile)
 
     @staticmethod
     def _loss_from_starvla_output(output: Any) -> tuple[Tensor, dict[str, Any]]:
@@ -305,6 +364,15 @@ class StarVLAPolicy(PreTrainedPolicy):
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
         self.eval()
+        if self.config.use_tactile:
+            tactile = batch.get(self.config.tactile_history_key)
+            if tactile is None:
+                raise ValueError(
+                    f"use_tactile=True requires batch key {self.config.tactile_history_key!r}."
+                )
+            if tactile.ndim == 2 or (tactile.ndim == 3 and tactile.shape[1] == 1):
+                batch = dict(batch)
+                batch[self.config.tactile_history_key] = self._update_online_tactile_history(tactile)
         if len(self._action_queue) == 0:
             actions = self.predict_action_chunk(batch, **kwargs)[:, : self.config.n_action_steps]
             skip_start_steps = max(0, int(self.config.action_execution_skip_start_steps))
@@ -315,6 +383,7 @@ class StarVLAPolicy(PreTrainedPolicy):
 
     def reset(self):
         self._action_queue = deque(maxlen=self.config.n_action_steps)
+        self._tactile_history = deque(maxlen=self.config.tactile_history_len)
 
     def get_optim_params(self):
         vlm_lr = self.config.vlm_optimizer_lr
@@ -324,6 +393,12 @@ class StarVLAPolicy(PreTrainedPolicy):
         if action_model is None:
             raise AttributeError("Differential StarVLA LR requires framework.action_model.")
         action_params = [param for param in action_model.parameters() if param.requires_grad]
+        # The tactile branch conditions the action expert directly, so train
+        # its new parameters with the existing action-head LR (no new LR).
+        for module_name in ("tactile_encoder", "tactile_proj"):
+            module = getattr(self.starvla_model, module_name, None)
+            if module is not None:
+                action_params.extend(param for param in module.parameters() if param.requires_grad)
         action_ids = {id(param) for param in action_params}
         vlm_params = [
             param for param in self.parameters() if param.requires_grad and id(param) not in action_ids

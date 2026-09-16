@@ -209,6 +209,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--append-state-feature-prefixes",
+        default="",
+        help=(
+            "Comma-separated raw observation.state name prefixes to append after the canonical "
+            "state (for example 'tactile_' to retain six-axis tactile force/torque channels)."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -526,6 +534,7 @@ def build_state_action_from_raw(
     missing_value: float,
     real_mask_arm: str = "none",
     add_inter_arm_relative_state: bool = False,
+    append_state_feature_prefixes: list[str] | None = None,
 ) -> dict[str, np.ndarray]:
     source_state_names = list(info["features"][OBS_STATE]["names"])
     source_action_names = list(info["features"][ACTION]["names"])
@@ -678,6 +687,24 @@ def build_state_action_from_raw(
             axis=1,
         ).astype(np.float32)
         state_feature_names = state_feature_names + INTER_ARM_RELATIVE_STATE_NAMES + [STATE_AVAILABLE_NAME]
+    append_state_feature_prefixes = append_state_feature_prefixes or []
+    if append_state_feature_prefixes:
+        extra_indices = [
+            index
+            for index, name in enumerate(source_state_names)
+            if any(name.startswith(prefix) for prefix in append_state_feature_prefixes)
+        ]
+        if not extra_indices:
+            raise ValueError(
+                "No raw observation.state features matched --append-state-feature-prefixes="
+                f"{append_state_feature_prefixes!r}. Available names: {source_state_names}"
+            )
+        extra_state = state_matrix[:, extra_indices].astype(np.float32)
+        extra_valid = np.isfinite(extra_state) & (extra_state != missing_value)
+        extra_state = np.where(extra_valid, extra_state, 0.0).astype(np.float32)
+        canonical_state = np.concatenate([canonical_state, extra_state], axis=1).astype(np.float32)
+        state_mask = np.concatenate([state_mask, extra_valid.astype(np.float32)], axis=1).astype(np.float32)
+        state_feature_names = state_feature_names + [source_state_names[index] for index in extra_indices]
     canonical_action = np.concatenate(action_arms, axis=1).astype(np.float32)
     action_valid_mask = np.concatenate(action_masks, axis=1).astype(np.float32)
     prev_action, prev_action_valid_mask = build_previous_action(
@@ -1102,6 +1129,7 @@ def build_sidecar_for_dataset(
     relative_exclude_joints: str,
     overwrite: bool,
     add_inter_arm_relative_state: bool,
+    append_state_feature_prefixes: list[str],
 ) -> dict[str, Any]:
     info_path = dataset_root / "meta" / "info.json"
     stats_path = dataset_root / "meta" / "stats.json"
@@ -1140,6 +1168,7 @@ def build_sidecar_for_dataset(
         missing_value=missing_value,
         real_mask_arm=real_mask_arm,
         add_inter_arm_relative_state=add_inter_arm_relative_state,
+        append_state_feature_prefixes=append_state_feature_prefixes,
     )
 
     task_text = resolve_task_text(dataset_root)
@@ -1310,6 +1339,7 @@ def main() -> None:
                 relative_exclude_joints=args.relative_exclude_joints,
                 overwrite=args.overwrite,
                 add_inter_arm_relative_state=args.add_inter_arm_relative_state,
+                append_state_feature_prefixes=parse_csv_tokens(args.append_state_feature_prefixes),
             )
         )
 
