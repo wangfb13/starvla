@@ -3,6 +3,7 @@
 """LeRobot config for the vendored official StarVLA framework backend."""
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from lerobot.configs.policies import PreTrainedConfig
@@ -63,6 +64,12 @@ class StarVLAConfig(PreTrainedConfig):
     tactile_channels: int = 4
     tactile_latent_dim: int = 128
     tactile_history_key: str = "observation.tactile_history"
+    # DD is decoded float data, separate from RGB image processors.
+    use_dd_contact: bool = False
+    dd_contact_input_key: str = "observation.tactile_dd"
+    dd_contact_latent_dim: int = 128
+    dd_contact_channel_scale: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
+    contact_optimizer_lr: float | None = 1e-4
     # Four sensors, each specified as [Fx, Fy, Fz] indices in observation.state:
     # left-left, left-right, right-left, right-right.
     tactile_force_indices: list[int] = field(default_factory=list)
@@ -99,8 +106,6 @@ class StarVLAConfig(PreTrainedConfig):
     def get_observation_delta_indices(self, feature_key: str) -> list | None:
         history_len = self.state_history_horizon
         if self.use_tactile:
-            if not self.use_state_input:
-                raise ValueError("use_tactile=True requires use_state_input=True for qpos/state input.")
             history_len = max(history_len, self.tactile_history_len)
         if feature_key == OBS_STATE and history_len > 1:
             # Strictly causal: the newest sample is t (delta 0); no positive
@@ -151,19 +156,35 @@ class StarVLAConfig(PreTrainedConfig):
                 raise ValueError("Tactile history conditioning is currently implemented for QwenPI/QwenFM.")
             if self.tactile_history_len < 1:
                 raise ValueError("tactile_history_len must be at least 1.")
-            if self.tactile_channels != 4:
-                raise ValueError("The current four-sensor force aggregation produces exactly 4 channels.")
+            if self.tactile_channels not in {2, 4}:
+                raise ValueError(
+                    "Tactile force aggregation supports 2 channels for one hand or 4 channels for two hands."
+                )
             if self.tactile_latent_dim < 1:
                 raise ValueError("tactile_latent_dim must be at least 1.")
-            if len(self.tactile_force_indices) != 12:
+            expected_force_indices = 6 if self.tactile_channels == 2 else 12
+            if len(self.tactile_force_indices) != expected_force_indices:
                 raise ValueError(
-                    "use_tactile=True requires 12 tactile_force_indices ordered as "
-                    "four [Fx, Fy, Fz] sensor triples."
+                    f"tactile_channels={self.tactile_channels} requires {expected_force_indices} "
+                    "tactile_force_indices ordered as [Fx, Fy, Fz] sensor triples."
                 )
             if min(self.tactile_force_indices) < 0:
                 raise ValueError("tactile_force_indices must be non-negative.")
             if self.state_dim is not None and max(self.tactile_force_indices) >= self.state_dim:
                 raise ValueError("tactile_force_indices contains an index outside policy.state_dim.")
+        if self.use_dd_contact:
+            if self.framework_name not in {"QwenPI", "QwenFM"} or not self.use_tactile:
+                raise ValueError("DD residual conditioning requires QwenPI/QwenFM with use_tactile=True.")
+            if self.dd_contact_latent_dim < 1:
+                raise ValueError("DD latent dimension must be positive.")
+            if len(self.dd_contact_channel_scale) != 3 or any(
+                not math.isfinite(value) or value <= 0 for value in self.dd_contact_channel_scale
+            ):
+                raise ValueError("dd_contact_channel_scale must contain three finite positive values.")
+            if self.contact_optimizer_lr is not None and (
+                not math.isfinite(self.contact_optimizer_lr) or self.contact_optimizer_lr <= 0
+            ):
+                raise ValueError("contact_optimizer_lr must be positive when specified.")
         if self.relative_state_history_to_current and self.state_history_horizon < 2:
             raise ValueError("Current-relative state history requires at least two state frames.")
         if self.state_full_dropout_prob < 0 or self.inter_arm_state_dropout_prob < 0:
@@ -232,7 +253,7 @@ class StarVLAConfig(PreTrainedConfig):
         return {
             key: feature
             for key, feature in (self.input_features or {}).items()
-            if feature.type is not FeatureType.VISUAL
+            if feature.type is not FeatureType.VISUAL and key != self.dd_contact_input_key
         }
 
     def resolved_image_keys(self) -> list[str]:
@@ -259,6 +280,9 @@ class StarVLAConfig(PreTrainedConfig):
         framework["tactile_history_len"] = int(self.tactile_history_len)
         framework["tactile_channels"] = int(self.tactile_channels)
         framework["tactile_latent_dim"] = int(self.tactile_latent_dim)
+        framework["use_dd_contact"] = bool(self.use_dd_contact)
+        framework["dd_contact_latent_dim"] = int(self.dd_contact_latent_dim)
+        framework["dd_contact_channel_scale"] = list(self.dd_contact_channel_scale)
 
         action_model = dict(framework.get("action_model", {}))
         action_model.setdefault("action_dim", int(self.action_dim or 0))

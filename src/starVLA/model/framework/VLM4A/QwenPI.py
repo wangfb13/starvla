@@ -27,6 +27,7 @@ from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config, populate_layerwise_dit_cfg
 from starVLA.model.modules.action_model.LayerwiseFM_ActionHeader import LayerwiseFlowmatchingActionHead, get_action_model
 from starVLA.model.modules.vlm import get_vlm_model
+from starVLA.model.modules.dd_contact import DDConditioner
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 from starVLA.training.trainer_utils.trainer_tools import resize_images
 
@@ -58,6 +59,10 @@ class QwenPIDefaultConfig:
     tactile_history_len: int = 30
     tactile_channels: int = 4
     tactile_latent_dim: int = 128
+    # Spatial DD residual on the existing force token; action loss only.
+    use_dd_contact: bool = False
+    dd_contact_latent_dim: int = 128
+    dd_contact_channel_scale: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
 
     # === VLM backbone (Qwen2.5-VL / Qwen3-VL) ===
     qwenvl: dict = field(
@@ -202,6 +207,16 @@ class Qwen_PI(baseframework):
                 int(self.config.framework.tactile_latent_dim), llm_hidden_size
             )
 
+        self.use_dd_contact = bool(self.config.framework.use_dd_contact)
+        if self.use_dd_contact:
+            if not self.use_tactile:
+                raise ValueError("DD residual conditioning requires use_tactile=True.")
+            self.dd_contact = DDConditioner(
+                hidden_dim=llm_hidden_size,
+                latent_dim=int(self.config.framework.dd_contact_latent_dim),
+                channel_scale=self.config.framework.dd_contact_channel_scale,
+            )
+
         # `action_horizon` is the single source of truth for chunk length.
         # Legacy aliases (`future_action_window_size`, `past_action_window_size`)
         # are normalised upstream by `share_tools.apply_config_compat`, so we
@@ -246,7 +261,16 @@ class Qwen_PI(baseframework):
             dtype=self.tactile_encoder.mlp[0].weight.dtype,
         )
         z_tactile = self.tactile_encoder(tactile_history)  # [B,128]
-        tactile_token = self.tactile_proj(z_tactile).to(dtype=base_hidden.dtype).unsqueeze(1)
+        tactile_token = self.tactile_proj(z_tactile)
+        if self.use_dd_contact:
+            if any("tactile_dd" not in example for example in examples):
+                raise ValueError("use_dd_contact=True requires decoded tactile_dd in every example.")
+            dd = torch.stack([
+                torch.as_tensor(example["tactile_dd"], device=base_hidden.device)
+                for example in examples
+            ])
+            tactile_token = tactile_token + self.dd_contact(dd).to(dtype=tactile_token.dtype)
+        tactile_token = tactile_token.to(dtype=base_hidden.dtype).unsqueeze(1)
         conditioned = [torch.cat((hidden, tactile_token), dim=1) for hidden in vl_embs_list]
 
         batch_size, vl_tokens = base_hidden.shape[:2]

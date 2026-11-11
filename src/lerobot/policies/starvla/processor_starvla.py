@@ -32,7 +32,7 @@ from .configuration_starvla import StarVLAConfig
 @ProcessorStepRegistry.register(name="starvla_prepare_tactile_history")
 @dataclass
 class StarVLAPrepareTactileHistoryProcessorStep(ProcessorStep):
-    """Build raw physical [left/right normal/tangent] histories from four FT sensors."""
+    """Build raw physical normal/tangent histories from one or two hands."""
 
     enabled: bool = False
     history_len: int = 30
@@ -52,25 +52,32 @@ class StarVLAPrepareTactileHistoryProcessorStep(ProcessorStep):
             state = state.unsqueeze(1)
         if state.ndim != 3:
             raise ValueError(f"Expected state [B,T,D] or [B,D], got {tuple(state.shape)}")
-        if len(self.force_indices) != 12 or max(self.force_indices) >= state.shape[-1]:
+        if len(self.force_indices) not in {6, 12} or max(self.force_indices) >= state.shape[-1]:
             raise ValueError(
                 f"Invalid tactile force indices {self.force_indices} for state shape {tuple(state.shape)}"
             )
 
         index = torch.as_tensor(self.force_indices, device=state.device, dtype=torch.long)
-        # [B,T,4 sensors,3 axes], sensor order: LL, LR, RL, RR.
-        force = state.index_select(-1, index).reshape(*state.shape[:-1], 4, 3)
+        sensor_count = len(self.force_indices) // 3
+        # [B,T,S,3], using two fingertip sensors per selected hand.
+        force = state.index_select(-1, index).reshape(*state.shape[:-1], sensor_count, 3)
         normal = force[..., 2].abs()
         tangent = torch.linalg.vector_norm(force[..., :2], dim=-1)
-        tactile = torch.stack(
-            (
-                normal[..., 0] + normal[..., 1],
-                tangent[..., 0] + tangent[..., 1],
-                normal[..., 2] + normal[..., 3],
-                tangent[..., 2] + tangent[..., 3],
-            ),
-            dim=-1,
-        )
+        if sensor_count == 2:
+            tactile = torch.stack(
+                (normal[..., 0] + normal[..., 1], tangent[..., 0] + tangent[..., 1]),
+                dim=-1,
+            )
+        else:
+            tactile = torch.stack(
+                (
+                    normal[..., 0] + normal[..., 1],
+                    tangent[..., 0] + tangent[..., 1],
+                    normal[..., 2] + normal[..., 3],
+                    tangent[..., 2] + tangent[..., 3],
+                ),
+                dim=-1,
+            )
 
         # Dataset history retrieval clamps pre-episode indices to frame 0;
         # replace those repeated samples with the required left zero padding.
@@ -84,6 +91,16 @@ class StarVLAPrepareTactileHistoryProcessorStep(ProcessorStep):
         transition[TransitionKey.OBSERVATION] = observation
         return transition
 
+    def get_config(self) -> dict[str, Any]:
+        # Persist the physical force history definition. ProcessorStep's default
+        # get_config() is empty, which otherwise reloads this step disabled.
+        return {
+            "enabled": bool(self.enabled),
+            "history_len": int(self.history_len),
+            "force_indices": list(self.force_indices),
+            "output_key": self.output_key,
+        }
+
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
@@ -93,7 +110,7 @@ class StarVLAPrepareTactileHistoryProcessorStep(ProcessorStep):
         transformed.setdefault(PipelineFeatureType.OBSERVATION, {})
         transformed[PipelineFeatureType.OBSERVATION][self.output_key] = PolicyFeature(
             type=FeatureType.STATE,
-            shape=(self.history_len, 4),
+            shape=(self.history_len, 2 if len(self.force_indices) == 6 else 4),
         )
         return transformed
 

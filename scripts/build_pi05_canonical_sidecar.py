@@ -141,6 +141,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--canonical-arm",
+        choices=["both", "left", "right"],
+        default="both",
+        help=(
+            "Select the arm(s) emitted by the canonical sidecar. A single-arm sidecar places that "
+            "arm's 10D TCP/gripper state first, emits a matching 10D action, and retains only that "
+            "arm's appended tactile features."
+        ),
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         required=True,
@@ -523,6 +533,36 @@ def build_previous_action(
     return prev_action, prev_mask
 
 
+def select_canonical_arm(canonical: dict[str, Any], arm: str) -> dict[str, Any]:
+    """Project a canonical bimanual sidecar to one arm after the raw conversion."""
+    all_action_names = canonical_action_feature_names()
+    canonical["action_feature_names"] = all_action_names
+    canonical["canonical_arm"] = arm
+    if arm == "both":
+        return canonical
+
+    arm_index = ARM_NAMES.index(arm)
+    arm_start = arm_index * ARM_CANONICAL_DIM
+    arm_slice = slice(arm_start, arm_start + ARM_CANONICAL_DIM)
+    state_names = list(canonical["state_feature_names"])
+    tactile_prefix = f"tactile_{arm}_"
+    tactile_indices = [index for index, name in enumerate(state_names) if name.startswith(tactile_prefix)]
+    state_indices = list(range(arm_start, arm_start + ARM_CANONICAL_DIM)) + tactile_indices
+
+    projected = dict(canonical)
+    projected[OBS_STATE] = canonical[OBS_STATE][:, state_indices].astype(np.float32)
+    projected["state_mask"] = canonical["state_mask"][:, state_indices].astype(np.float32)
+    projected["state_feature_names"] = [state_names[index] for index in state_indices]
+    projected[ACTION] = canonical[ACTION][:, arm_slice].astype(np.float32)
+    projected["action_valid_mask"] = canonical["action_valid_mask"][:, arm_slice].astype(np.float32)
+    projected["action_feature_names"] = all_action_names[arm_slice]
+    projected["prev_action"] = canonical["prev_action"][:, arm_slice].astype(np.float32)
+    projected["prev_action_valid_mask"] = canonical["prev_action_valid_mask"][:, arm_slice].astype(np.float32)
+    projected["arm_present_mask"] = canonical["arm_present_mask"][:, arm_index : arm_index + 1]
+    projected["state_present"] = projected["arm_present_mask"][:, 0].astype(np.float32)
+    return projected
+
+
 def build_state_action_from_raw(
     *,
     frame_df: pd.DataFrame,
@@ -738,6 +778,8 @@ def build_state_action_from_raw(
         "arm_anchor_counts": arm_anchor_counts,
         "gripper_open_abs_by_arm": gripper_open_abs_by_arm,
         "state_feature_names": state_feature_names,
+        "action_feature_names": canonical_action_feature_names(),
+        "canonical_arm": "both",
     }
 
 
@@ -921,7 +963,7 @@ def compute_framewise_stats(canonical: dict[str, np.ndarray], base_stats: dict[s
     stats[ACTION] = compute_masked_stats(
         canonical[ACTION],
         canonical["action_valid_mask"],
-        canonical_action_feature_names(),
+        canonical["action_feature_names"],
     )
     stats["action_valid_mask"] = get_feature_stats(
         canonical["action_valid_mask"].astype(np.float32),
@@ -1034,6 +1076,7 @@ def compute_relative_action_chunk_stats(
     action_gap_frames: int,
     relative_keyframes: list[tuple[int, int]],
     relative_exclude_joints: list[str],
+    action_names: list[str],
 ) -> dict[str, np.ndarray]:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -1053,10 +1096,11 @@ def compute_relative_action_chunk_stats(
     total = len(actions)
     block_size = 4096
     chunk_offsets = np.arange(chunk_size, dtype=np.int64)
-    relative_mask = relative_mask_from_action_names(canonical_action_feature_names(), relative_exclude_joints)
+    action_dim = actions.shape[1]
+    relative_mask = relative_mask_from_action_names(action_names, relative_exclude_joints)
     for pos_start, rot_start in relative_keyframes:
-        relative_mask[pos_start : min(pos_start + 3, CANONICAL_ACTION_DIM)] = 0.0
-        relative_mask[rot_start : min(rot_start + 6, CANONICAL_ACTION_DIM)] = 0.0
+        relative_mask[pos_start : min(pos_start + 3, action_dim)] = 0.0
+        relative_mask[rot_start : min(rot_start + 6, action_dim)] = 0.0
     for block_start in range(0, total, block_size):
         block_end = min(block_start + block_size, total)
         start_indices = np.arange(block_start, block_end, dtype=np.int64)
@@ -1067,20 +1111,20 @@ def compute_relative_action_chunk_stats(
         chunk_masks = action_valid_mask[query_indices].copy()
         chunk_actions = apply_keyframe_relative_actions(
             chunk_actions,
-            states[start_indices, :CANONICAL_ACTION_DIM],
+            states[start_indices, :action_dim],
             relative_keyframes,
         )
-        mask_dim = min(CANONICAL_ACTION_DIM, states.shape[1], actions.shape[1])
+        mask_dim = min(action_dim, states.shape[1])
         chunk_actions[:, :, :mask_dim] -= states[start_indices, None, :mask_dim] * relative_mask[:mask_dim]
-        relative_values.append(chunk_actions.reshape(-1, CANONICAL_ACTION_DIM))
-        relative_valid.append(chunk_masks.reshape(-1, CANONICAL_ACTION_DIM))
+        relative_values.append(chunk_actions.reshape(-1, action_dim))
+        relative_valid.append(chunk_masks.reshape(-1, action_dim))
 
     if not relative_values:
         raise RuntimeError("No relative action chunks were available for stats computation.")
 
     values = np.concatenate(relative_values, axis=0)
     valid = np.concatenate(relative_valid, axis=0)
-    return compute_masked_stats(values, valid, canonical_action_feature_names())
+    return compute_masked_stats(values, valid, action_names)
 
 
 def load_base_sidecar_map(path: Path | None) -> dict[str, Path]:
@@ -1119,6 +1163,7 @@ def build_sidecar_for_dataset(
     umi_gripper_normalization: str,
     umi_gripper_open_abs: float,
     real_mask_arm: str,
+    canonical_arm: str,
     output_root: Path,
     schema_name: str,
     missing_value: float,
@@ -1170,6 +1215,7 @@ def build_sidecar_for_dataset(
         add_inter_arm_relative_state=add_inter_arm_relative_state,
         append_state_feature_prefixes=append_state_feature_prefixes,
     )
+    canonical = select_canonical_arm(canonical, canonical_arm)
 
     task_text = resolve_task_text(dataset_root)
     subtask_text, next_subtask_text = build_subtask_columns(frame_df, dataset_root)
@@ -1213,6 +1259,7 @@ def build_sidecar_for_dataset(
             action_gap_frames=relative_stats_action_gap_frames,
             relative_keyframes=relative_keyframes,
             relative_exclude_joints=relative_exclude_joint_tokens,
+            action_names=canonical["action_feature_names"],
         )
         relative_stats = deepcopy(framewise_stats)
         relative_stats[ACTION] = relative_action_stats
@@ -1240,9 +1287,10 @@ def build_sidecar_for_dataset(
         "base_sidecar": str(base_sidecar) if base_sidecar is not None else None,
         "row_count": int(len(framewise_df)),
         "canonical_state_dim": int(canonical[OBS_STATE].shape[1]),
-        "canonical_action_dim": CANONICAL_ACTION_DIM,
+        "canonical_action_dim": int(canonical[ACTION].shape[1]),
         "canonical_state_names": canonical["state_feature_names"],
-        "canonical_action_names": canonical_action_feature_names(),
+        "canonical_action_names": canonical["action_feature_names"],
+        "canonical_arm": canonical["canonical_arm"],
         "state_pose_mode": (
             "episode_anchor_relative_rot6d"
             if dataset_type == "umi" and umi_pose_frame == "episode_anchor"
@@ -1290,7 +1338,7 @@ def build_sidecar_for_dataset(
             "action_valid_mask_key": "action_valid_mask",
             "state_present_key": "state_present",
             "max_state_dim": int(canonical[OBS_STATE].shape[1]),
-            "max_action_dim": CANONICAL_ACTION_DIM,
+            "max_action_dim": int(canonical[ACTION].shape[1]),
         },
     }
     write_json(summary_path, summary)
@@ -1329,6 +1377,7 @@ def main() -> None:
                 umi_gripper_normalization=args.umi_gripper_normalization,
                 umi_gripper_open_abs=args.umi_gripper_open_abs,
                 real_mask_arm=args.real_mask_arm,
+                canonical_arm=args.canonical_arm,
                 output_root=args.output_root,
                 schema_name=args.schema_name,
                 missing_value=args.missing_value,

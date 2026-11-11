@@ -100,6 +100,13 @@ class StarVLAPolicy(PreTrainedPolicy):
             param.requires_grad = False
         qwen_vl.eval()
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # A frozen VLM should also keep its inference behavior during training.
+        if self.config.freeze_vlm:
+            self.starvla_model.qwen_vl_interface.eval()
+        return self
+
     def _build_selected_framework(self, official_cfg: Any, framework_registry: Any) -> torch.nn.Module:
         framework_name = str(self.config.framework_name)
         module_name = _FRAMEWORK_MODULES.get(framework_name)
@@ -169,6 +176,7 @@ class StarVLAPolicy(PreTrainedPolicy):
         tasks = self._get_tasks(batch, bsize)
         model_state = self._get_model_state(batch)
         tactile_history = self._get_tactile_history(batch)
+        tactile_dd = self._get_tactile_dd(batch)
 
         examples: list[dict[str, Any]] = []
         for batch_idx in range(bsize):
@@ -190,12 +198,32 @@ class StarVLAPolicy(PreTrainedPolicy):
                 example["tactile_history"] = (
                     tactile_history[batch_idx].detach().to("cpu").numpy()
                 )
+            if tactile_dd is not None:
+                # Do not quantize or route physical DD through PIL/RGB transforms.
+                example["tactile_dd"] = tactile_dd[batch_idx].detach()
             if include_actions:
                 if ACTION not in batch:
                     raise ValueError("StarVLA training forward requires 'action' in the batch.")
                 example["action"] = batch[ACTION][batch_idx].detach().to("cpu").numpy()
             examples.append(example)
         return examples
+
+    def _get_tactile_dd(self, batch: dict[str, Any]) -> Tensor | None:
+        if not self.config.use_dd_contact:
+            return None
+        key = self.config.dd_contact_input_key
+        if key not in batch:
+            raise ValueError(f"use_dd_contact=True requires decoded DD batch key {key!r}.")
+        tactile_dd = batch[key]
+        if (
+            not isinstance(tactile_dd, Tensor)
+            or tactile_dd.ndim != 5
+            or tuple(tactile_dd.shape[1:]) != (2, 3, 96, 128)
+        ):
+            raise ValueError("Expected decoded DD Tensor [B,2,3,96,128].")
+        if not tactile_dd.is_floating_point():
+            raise ValueError("DD must be decoded floating-point D, Dx, Dy, not uint16 or RGB.")
+        return tactile_dd
 
     def _get_model_state(self, batch: dict[str, Any]) -> Tensor | None:
         if not self.config.use_state_input or OBS_STATE not in batch:
@@ -387,23 +415,45 @@ class StarVLAPolicy(PreTrainedPolicy):
 
     def get_optim_params(self):
         vlm_lr = self.config.vlm_optimizer_lr
-        if vlm_lr is None:
+        contact_lr = self.config.contact_optimizer_lr if self.config.use_dd_contact else None
+        if vlm_lr is None and contact_lr is None:
             return self.parameters()
+
+        contact_module = getattr(self.starvla_model, "dd_contact", None)
+        contact_params = (
+            [param for param in contact_module.parameters() if param.requires_grad]
+            if contact_module is not None else []
+        )
+        contact_ids = {id(param) for param in contact_params}
+        groups = []
+        if contact_params:
+            groups.append({
+                "params": contact_params,
+                "lr": float(contact_lr if contact_lr is not None else self.config.optimizer_lr),
+                "name": "dd_contact",
+            })
+
+        if vlm_lr is None:
+            other_params = [p for p in self.parameters() if p.requires_grad and id(p) not in contact_ids]
+            if other_params:
+                groups.append({"params": other_params, "lr": float(self.config.optimizer_lr), "name": "policy"})
+            return groups
+
         action_model = getattr(self.starvla_model, "action_model", None)
         if action_model is None:
             raise AttributeError("Differential StarVLA LR requires framework.action_model.")
         action_params = [param for param in action_model.parameters() if param.requires_grad]
-        # The tactile branch conditions the action expert directly, so train
-        # its new parameters with the existing action-head LR (no new LR).
         for module_name in ("tactile_encoder", "tactile_proj"):
             module = getattr(self.starvla_model, module_name, None)
             if module is not None:
                 action_params.extend(param for param in module.parameters() if param.requires_grad)
         action_ids = {id(param) for param in action_params}
         vlm_params = [
-            param for param in self.parameters() if param.requires_grad and id(param) not in action_ids
+            param for param in self.parameters()
+            if param.requires_grad and id(param) not in action_ids and id(param) not in contact_ids
         ]
-        return [
-            {"params": vlm_params, "lr": float(vlm_lr)},
-            {"params": action_params, "lr": float(self.config.optimizer_lr)},
-        ]
+        if vlm_params:
+            groups.append({"params": vlm_params, "lr": float(vlm_lr), "name": "vlm"})
+        if action_params:
+            groups.append({"params": action_params, "lr": float(self.config.optimizer_lr), "name": "action"})
+        return groups
